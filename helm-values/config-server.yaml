@@ -6,22 +6,17 @@
 # nothing: no init containers, and the shortest path to Ready of the eight.
 
 fullnameOverride: config-server
-
 # app.kubernetes.io/component — the spec's vocabulary is {server|service|gateway|admin}.
 component: server
-
 image:
   name: config-server
   # v1.0.0 is the tag scripts/build-push-ecr.sh pushed for PETPLAT-85 and the
   # tag currently in ECR. CI replaces this with the commit SHA on every build
   # (PETPLAT-101) — never with `latest`.
-  tag: "v1.0.0"
-
+  tag: "48d7745"
 service:
   port: 8888
-
 springProfiles: docker
-
 # docs/technical-spec.md → "Health Probes": "Config Server uses /actuator/health
 # for all three probes." Only the paths are overridden here — the timings stay at
 # the chart defaults.
@@ -42,11 +37,9 @@ probes:
     path: /actuator/health
   liveness:
     path: /actuator/health
-
 # Deliberately empty. config-server is first in the chain; an init container
 # here would be waiting on itself.
 initContainers: []
-
 configMap:
   # No CONFIG_SERVER_URL here, and that is correct rather than an omission —
   # docs/technical-spec.md -> "Environment Variables per Service" lists it under
@@ -73,7 +66,6 @@ configMap:
     # an https:// URL in that slot produces a search location that silently
     # finds nothing.
     GIT_REPO: https://github.com/spring-petclinic/spring-petclinic-microservices-config
-
 resources:
   requests:
     cpu: 100m
@@ -81,7 +73,6 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
-
 # Two replicas, set here rather than in helm-values/prod.yaml — see the note
 # there for why the replica count cannot come from the shared env file. This is
 # the prod figure from the spec's overlay table ("2 | HA for config
@@ -92,13 +83,11 @@ resources:
 # the entire platform's cold-start path — and the PDB below only helps if there
 # is a second pod to fail over to.
 replicaCount: 2
-
 # No HPA: the spec's HPA table covers five services and config-server is not one
 # of them. It is a read-mostly config distributor, not a traffic path — and its
 # replica count is a deliberate choice rather than something to track load with.
 autoscaling:
   enabled: false
-
 # PDB is on: every other service blocks on this one at startup, so evicting the
 # only Ready replica during a node drain would take the whole platform's
 # cold-start path with it.

@@ -7,16 +7,12 @@
 # what makes it worth the paragraph.
 
 fullnameOverride: vets-service
-
 component: service
-
 image:
   name: vets-service
-  tag: "v1.0.0"
-
+  tag: "48d7745"
 service:
   port: 8083
-
 # THREE profiles, and `production` is not decoration.
 #
 # The application repo's vets-service/src/main/resources/application.yml sets
@@ -29,31 +25,24 @@ service:
 # goes to the database. The service still starts and still answers correctly,
 # which is exactly why this would go unnoticed until RDS load did.
 springProfiles: docker,mysql,production
-
 initContainers:
   - name: wait-for-config-server
     image: busybox:1.36
     command: ['sh', '-c', 'until wget -qO- http://config-server:8888/actuator/health; do sleep 5; done']
-
   - name: wait-for-discovery-server
     image: busybox:1.36
     command: ['sh', '-c', 'until wget -qO- http://discovery-server:8761/actuator/health; do sleep 5; done']
-
 secrets:
   - name: SPRING_DATASOURCE_USERNAME
     secretName: rds-credentials
     key: username
-
   - name: SPRING_DATASOURCE_PASSWORD
     secretName: rds-credentials
     key: password
-
 configMap:
   data:
     CONFIG_SERVER_URL: http://config-server:8888
-
     SPRING_DATASOURCE_URL: "{{ .Values.database.connectionString }}"
-
 resources:
   requests:
     cpu: 100m
@@ -61,13 +50,11 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
-
 autoscaling:
   enabled: true
   minReplicas: 2
   maxReplicas: 4
   targetCPUUtilizationPercentage: 70
-
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
