@@ -1,0 +1,73 @@
+# vets-service.yaml — Vets Service (PETPLAT-44)
+#
+# Merged as: helm/petclinic-service/values.yaml → this file → helm-values/{env}.yaml
+#
+# The one service whose profile list is not just docker,mysql — see the comment
+# on springProfiles below. Getting this wrong does not break startup, which is
+# what makes it worth the paragraph.
+
+fullnameOverride: vets-service
+
+component: service
+
+image:
+  name: vets-service
+  tag: "v1.0.0"
+
+service:
+  port: 8083
+
+# THREE profiles, and `production` is not decoration.
+#
+# The application repo's vets-service/src/main/resources/application.yml sets
+# `spring.profiles.active: production`, and SPRING_PROFILES_ACTIVE overrides it
+# rather than adding to it — so setting only `docker,mysql` here would switch
+# `production` OFF. That matters because
+# spring-petclinic-vets-service/.../vets/system/CacheConfig.java is annotated
+# @Profile("production"), and it is the only @Profile in the whole application:
+# without it the Caffeine cache bean is never registered and every /vets request
+# goes to the database. The service still starts and still answers correctly,
+# which is exactly why this would go unnoticed until RDS load did.
+springProfiles: docker,mysql,production
+
+initContainers:
+  - name: wait-for-config-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://config-server:8888/actuator/health; do sleep 5; done']
+
+  - name: wait-for-discovery-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://discovery-server:8761/actuator/health; do sleep 5; done']
+
+secrets:
+  - name: SPRING_DATASOURCE_USERNAME
+    secretName: rds-credentials
+    key: username
+
+  - name: SPRING_DATASOURCE_PASSWORD
+    secretName: rds-credentials
+    key: password
+
+configMap:
+  data:
+    CONFIG_SERVER_URL: http://config-server:8888
+
+    SPRING_DATASOURCE_URL: "{{ .Values.database.connectionString }}"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

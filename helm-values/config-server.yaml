@@ -1,0 +1,107 @@
+# config-server.yaml — Config Server (PETPLAT-39)
+#
+# Merged as: helm/petclinic-service/values.yaml → this file → helm-values/{env}.yaml
+#
+# Head of the startup chain. Every other service waits for it, so it waits for
+# nothing: no init containers, and the shortest path to Ready of the eight.
+
+fullnameOverride: config-server
+
+# app.kubernetes.io/component — the spec's vocabulary is {server|service|gateway|admin}.
+component: server
+
+image:
+  name: config-server
+  # v1.0.0 is the tag scripts/build-push-ecr.sh pushed for PETPLAT-85 and the
+  # tag currently in ECR. CI replaces this with the commit SHA on every build
+  # (PETPLAT-101) — never with `latest`.
+  tag: "v1.0.0"
+
+service:
+  port: 8888
+
+springProfiles: docker
+
+# docs/technical-spec.md → "Health Probes": "Config Server uses /actuator/health
+# for all three probes." Only the paths are overridden here — the timings stay at
+# the chart defaults.
+#
+# The override is required, but the health groups are not the reason: they exist
+# here exactly as they do on the other seven. The endpoints are unreachable. This
+# app's own config controller maps /{application}/{profile} and
+# /{application}/{profile}/{label}, and those two patterns claim every two- and
+# three-segment path — so /actuator/health/readiness is served as a config lookup
+# for the label `readiness`, a label that does not exist, and 404s. Measured
+# through a port-forward: /actuator/health answers 200 with a config body
+# ({"name":"actuator","profiles":["health"],…}), not a health one.
+#
+# Worth knowing when reading these probes: they are not health checks. What they
+# establish is that the HTTP server answers a config request.
+probes:
+  readiness:
+    path: /actuator/health
+  liveness:
+    path: /actuator/health
+
+# Deliberately empty. config-server is first in the chain; an init container
+# here would be waiting on itself.
+initContainers: []
+
+configMap:
+  # No CONFIG_SERVER_URL here, and that is correct rather than an omission —
+  # docs/technical-spec.md -> "Environment Variables per Service" lists it under
+  # "All services", but config-server's own application.yml has no
+  # spring.config.import at all: it IS the config source, so it has no URL to
+  # consume. The other seven all import
+  # `optional:configserver:${CONFIG_SERVER_URL:...}` and do set it.
+  #
+  # Note also that under the `docker` profile those seven import
+  # `configserver:http://config-server:8888` (hardcoded, no `optional:`), so
+  # CONFIG_SERVER_URL is what the DEFAULT-profile import reads — it is live
+  # config, not decoration, and leaving it empty would send that import at
+  # localhost.
+  data:
+    # The Config Server serves configuration out of a Git repository, and the
+    # URI for it is hardcoded in the application repo's own application.yml
+    # (spring.cloud.config.server.git.uri), so this variable is NOT what the
+    # default profile reads.
+    #
+    # It is here because PETPLAT-39 asks for it, and because it is what the
+    # `native` profile consumes — but note the value's meaning there:
+    # native.searchLocations is `file:///${GIT_REPO}`, a FILESYSTEM path. Point
+    # it at a checkout of the config repo if the native profile is ever enabled;
+    # an https:// URL in that slot produces a search location that silently
+    # finds nothing.
+    GIT_REPO: https://github.com/spring-petclinic/spring-petclinic-microservices-config
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Two replicas, set here rather than in helm-values/prod.yaml — see the note
+# there for why the replica count cannot come from the shared env file. This is
+# the prod figure from the spec's overlay table ("2 | HA for config
+# distribution"); dev.yaml collapses it back to 1.
+#
+# It matters more than it looks. Every other service blocks on this one at
+# startup, so a single-replica config-server is a single point of failure for
+# the entire platform's cold-start path — and the PDB below only helps if there
+# is a second pod to fail over to.
+replicaCount: 2
+
+# No HPA: the spec's HPA table covers five services and config-server is not one
+# of them. It is a read-mostly config distributor, not a traffic path — and its
+# replica count is a deliberate choice rather than something to track load with.
+autoscaling:
+  enabled: false
+
+# PDB is on: every other service blocks on this one at startup, so evicting the
+# only Ready replica during a node drain would take the whole platform's
+# cold-start path with it.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

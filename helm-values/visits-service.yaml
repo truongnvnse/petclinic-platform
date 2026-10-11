@@ -1,0 +1,70 @@
+# visits-service.yaml — Visits Service (PETPLAT-42)
+#
+# Merged as: helm/petclinic-service/values.yaml → this file → helm-values/{env}.yaml
+#
+# The third RDS-backed service and the one that proves the database wiring end
+# to end: `visits` has foreign keys into both `owners` and `vets`, so a row here
+# can only exist if customers-service and vets-service are reachable and
+# pointing at the same instance.
+
+fullnameOverride: visits-service
+
+component: service
+
+image:
+  name: visits-service
+  tag: "v1.0.0"
+
+service:
+  port: 8082
+
+springProfiles: docker,mysql
+
+initContainers:
+  # Waits on config-server and discovery-server, not on customers-service or
+  # vets-service. It does not need them to start — Spring Data JPA resolves
+  # foreign keys inside the database, not over HTTP. It does need the schema,
+  # which Hibernate creates on first connect.
+  - name: wait-for-config-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://config-server:8888/actuator/health; do sleep 5; done']
+
+  - name: wait-for-discovery-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://discovery-server:8761/actuator/health; do sleep 5; done']
+
+secrets:
+  - name: SPRING_DATASOURCE_USERNAME
+    secretName: rds-credentials
+    key: username
+
+  - name: SPRING_DATASOURCE_PASSWORD
+    secretName: rds-credentials
+    key: password
+
+configMap:
+  data:
+    CONFIG_SERVER_URL: http://config-server:8888
+
+    # Same as customers-service: the `mysql` profile would otherwise point this
+    # at localhost:3306, and spring.cloud.config.override-none=true in the
+    # config repo is what makes this environment variable win over it.
+    SPRING_DATASOURCE_URL: "{{ .Values.database.connectionString }}"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

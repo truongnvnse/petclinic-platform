@@ -1,0 +1,40 @@
+# namespace.yaml — the external-secrets namespace (PETPLAT-34)
+#
+# Holds the External Secrets Operator: the controller, its webhook and its cert
+# controller. Nothing of the application runs here — the Secrets the operator
+# writes land in the application namespaces (petclinic-dev, petclinic-prod),
+# because that is where the pods that mount them live.
+#
+# ---------------------------------------------------------------------------
+# Why this file is here and not in k8s/base/namespaces.yaml
+#
+# .claude/rules/kubernetes.md sketches a k8s/base/namespaces.yaml for namespace
+# definitions. This namespace is placed with the operator instead, because it is
+# not an application namespace: it is created and removed with the ESO install,
+# by the same script that applies everything else in this directory
+# (scripts/install-eso.sh). Splitting it into a separate file would mean a
+# teardown has to know about two locations for one component.
+#
+# The application namespaces (petclinic-dev, petclinic-prod) are deliberately
+# NOT defined here. They live in k8s/base/namespaces.yaml (PETPLAT-38) — putting
+# them in this file would make ESO's install the thing that owns them, which it
+# does not.
+# ---------------------------------------------------------------------------
+#
+# Label note: managed-by is "kubectl" rather than "Helm". These manifests are
+# applied by scripts/install-eso.sh, not rendered from a chart, and the
+# .claude/rules/kubernetes.md label block uses "kubectl" for the same reason.
+# The Helm chart in helm/petclinic-service/ is where "Helm" is accurate — its
+# outputs say so.
+
+apiVersion: v1
+kind: Namespace
+
+metadata:
+  name: external-secrets
+
+  labels:
+    app.kubernetes.io/name: external-secrets
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: infrastructure

@@ -6,28 +6,28 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/block-destroy.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-destroy.sh"
           },
           {
             "type": "command",
-            "command": "bash .claude/hooks/block-dangerous-rm.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-dangerous-rm.sh"
           },
           {
             "type": "command",
-            "command": "bash .claude/hooks/warn-apply-without-plan.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/warn-apply-without-plan.sh"
           },
           {
             "type": "command",
-            "command": "bash .claude/hooks/block-secret-commit.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-secret-commit.sh"
           }
         ]
       },
       {
-        "matcher": "mcp__.*__ExecuteTerraformCommand|mcp__.*__ExecuteTerragruntCommand",
+        "matcher": "mcp__.*[Tt]erraform.*",
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/block-mcp-destroy.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-mcp-destroy.sh"
           }
         ]
       }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/suggest-validate.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/suggest-validate.sh"
           }
         ]
       }

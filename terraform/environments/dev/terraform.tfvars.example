@@ -1,0 +1,52 @@
+# Template for dev variable values (PETPLAT-1)
+#
+# Copy to terraform.tfvars before running Terraform:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# terraform.tfvars is gitignored (*.tfvars) — never commit real values.
+
+aws_region  = "eu-central-1"
+environment = "dev"
+project     = "petclinic"
+
+# Apex domain whose existing Route 53 hosted zone backs the dev record
+# (petclinic-dev.{domain_name}). The zone must already exist — it is created by
+# registering the domain, not by Terraform.
+domain_name = "gannet.click"
+
+# The ALB alias record is created on a second apply, after the Ingress has made
+# the load balancer. Leave these unset until then; both values come from the
+# Ingress status, not from the Terraform state:
+#
+#   kubectl get ingress api-gateway -n petclinic-dev \
+#     -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+#   aws elbv2 describe-load-balancers --region eu-central-1 \
+#     --query "LoadBalancers[?DNSName=='<alb_dns_name>'].CanonicalHostedZoneId" --output text
+#
+# alb_dns_name = "k8s-petclinic-xxxxxxxx-1234567890.eu-central-1.elb.amazonaws.com"
+# alb_zone_id  = "Z215JYRZR1TBD5"
+
+# OpenAI API key for genai-service. Terraform writes it to Secrets Manager at
+# petclinic/dev/openai-api-key; the ExternalSecret in
+# k8s/base/external-secrets/openai-api-key.yaml reads it from there into the
+# genai-service pod, so the value never enters Git or a manifest.
+#
+# Required to create or update the secret — the plan fails if it is missing or
+# shorter than 20 characters, via a precondition on the secret version. An
+# empty value would otherwise apply cleanly and only surface later as an
+# authentication error from genai-service. Prefer the environment variable in
+# CI, where nothing is written to disk:
+#
+#   export TF_VAR_openai_api_key="sk-..."
+#
+# `terraform destroy` does NOT need it: destroy skips preconditions, which is
+# why the variable has a default of "". Leaving it unset is fine for teardown.
+#
+# The variable is ephemeral, so the value is written to neither terraform.tfstate
+# nor plan.out — setting it here does not put it in those files.
+#
+# To change the key later, bump openai_api_key_version in main.tf as well. The
+# write-only argument is never read back, so Terraform sees no difference from
+# editing this value alone and would leave the old key in Secrets Manager.
+#
+# openai_api_key = "sk-..."

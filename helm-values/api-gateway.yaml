@@ -1,0 +1,68 @@
+# api-gateway.yaml — API Gateway (PETPLAT-43)
+#
+# Merged as: helm/petclinic-service/values.yaml → this file → helm-values/{env}.yaml
+#
+# The only service reachable from outside the cluster. k8s/base/ingress/ingress.yaml
+# sends every ALB request to `api-gateway:8080`, and the gateway routes from
+# there to the other services through Eureka — which is why the Service name has
+# to be exactly `api-gateway` and why the port here has to match the one in the
+# Ingress backend.
+
+fullnameOverride: api-gateway
+
+component: gateway
+
+image:
+  name: api-gateway
+  tag: "v1.0.0"
+
+service:
+  port: 8080
+
+springProfiles: docker
+
+initContainers:
+  # Both waits, because the gateway is downstream of both: it reads its routes
+  # from the Config Server and resolves `lb://customers-service` and friends
+  # through Eureka. Starting before Eureka is up leaves the gateway running but
+  # unable to resolve any route target until its next registry fetch.
+  - name: wait-for-config-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://config-server:8888/actuator/health; do sleep 5; done']
+
+  - name: wait-for-discovery-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://discovery-server:8761/actuator/health; do sleep 5; done']
+
+configMap:
+  data:
+    CONFIG_SERVER_URL: http://config-server:8888
+
+    # PETPLAT-43 asks for this variable, and it is here for the same reason as
+    # CONFIG_SERVER_URL above: the application reads neither under the `docker`
+    # profile. What actually points the gateway at Eureka is
+    # `eureka.client.serviceUrl.defaultZone: http://discovery-server:8761/eureka/`
+    # in the config repo's api-gateway.yml, activated by the `docker` profile.
+    # Kept because it documents the dependency and is what the default profile
+    # would need.
+    DISCOVERY_SERVER_URL: http://discovery-server:8761
+
+resources:
+  # Higher than the rest: this is the one service every request passes through,
+  # and it is the one whose CPU request the HPA scales against.
+  requests:
+    cpu: 200m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

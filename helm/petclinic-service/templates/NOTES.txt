@@ -1,0 +1,42 @@
+{{ .Chart.Name }} — {{ include "petclinic-service.fullname" . }} in {{ .Release.Namespace }}
+{{- $svc := include "petclinic-service.fullname" . }}
+
+Image      {{ include "petclinic-service.image" . }}
+{{ if .Values.autoscaling.enabled -}}
+Replicas   {{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} (HPA, target {{ .Values.autoscaling.targetCPUUtilizationPercentage }}% CPU)
+{{- else -}}
+Replicas   {{ .Values.replicaCount }}{{ if .Values.podDisruptionBudget.enabled }} (PDB minAvailable {{ .Values.podDisruptionBudget.minAvailable }}){{ end }}
+{{- end }}
+Profiles   {{ .Values.springProfiles }}
+
+Watch it come up. The init containers hold the app container until
+config-server, and then discovery-server, answer their health endpoints — on a
+cold cluster expect to sit in Init for a while before the JVM even starts:
+
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ $svc }} -w
+
+If a pod is stuck in Init, it is waiting rather than failing. Look at which
+container is not finished:
+
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ $svc }} -c wait-for-config-server
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ $svc }} -c wait-for-discovery-server
+
+If the app container itself is restarting, the probes are the place to look —
+readiness failing keeps a pod out of the Service, liveness failing restarts it,
+and the startupProbe gates both until the JVM finishes booting:
+
+  kubectl describe pod -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ $svc }}
+{{ if .Values.secrets }}
+This release reads {{ len .Values.secrets }} secret-backed variable(s) from
+{{ range .Values.secrets }}{{ .secretName }}{{ end }}. Those Secrets are written
+by External Secrets Operator; if the pod is up but the value is empty, check the
+ExternalSecret rather than the Deployment:
+
+  kubectl get externalsecret -n {{ .Release.Namespace }}
+{{- end }}
+{{ if .Values.autoscaling.enabled }}
+This release has an HPA, which needs Metrics Server. Without it the HPA reports
+<unknown> and never scales:
+
+  kubectl get hpa -n {{ .Release.Namespace }} {{ $svc }}
+{{- end }}

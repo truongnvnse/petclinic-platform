@@ -1,0 +1,95 @@
+# namespaces.yaml — the two application namespaces (PETPLAT-38)
+#
+# petclinic-dev and petclinic-prod. One namespace per environment, and every
+# application resource in this repository names one of them explicitly rather
+# than relying on the current kubectl context.
+#
+# Values from docs/technical-spec.md → "Kubernetes Manifests" → "Namespaces"
+# (names and PSA labels) and → "Network Policies" → "Pod Security Admission"
+# (the audit level).
+#
+# ---------------------------------------------------------------------------
+# Applying this file to the running dev cluster
+#
+# petclinic-dev already exists — it was created out of band with `kubectl create
+# namespace` during the ESO install. Applying this file does not conflict with
+# that: `kubectl apply` on an existing Namespace updates its labels in place and
+# leaves its contents alone. Nothing running in petclinic-dev is disturbed, and
+# the namespace stops being unmanaged. (Namespaces are cheap to adopt and
+# expensive to recreate — deleting one deletes every pod, Service and Secret
+# inside it — so adoption, not replace, is the right move.)
+#
+# petclinic-prod does not exist yet and this file is what creates it.
+#
+# ---------------------------------------------------------------------------
+# Pod Security Admission
+#
+# enforce: baseline, warn and audit: restricted — all three are the spec's
+# values, and the split is deliberate rather than cautious.
+#
+# `baseline` as the enforcing level is what these pods actually need: it forbids
+# hostNetwork, privileged containers, added capabilities and hostPath volumes,
+# none of which the chart uses. Enforcing `restricted` instead would also
+# demand a non-root user and a dropped capability set — which the chart's
+# securityContext already sets, so it would pass — but it would additionally
+# make the namespace hostile to any future pod that does not, including the
+# ones a Helm chart from outside this repository might bring in.
+#
+# `warn` and `audit` at `restricted` is what recovers the strictness: every
+# `kubectl apply` into these namespaces prints a warning naming any pod that
+# would fail restricted, and the API server records the same in its audit log.
+# The feedback arrives without the apply being rejected.
+#
+# ---------------------------------------------------------------------------
+# Label note: managed-by is "kubectl", not "Helm" — these manifests are applied
+# directly, not rendered from helm/petclinic-service/. Same reason as
+# k8s/base/external-secrets/namespace.yaml, and the same convention as
+# .claude/rules/kubernetes.md.
+#
+# `environment` is the one label here that is not part of the standard set. It
+# is what PETPLAT-38 asks for, and it is what makes a `kubectl get ns -l
+# environment=dev` a usable query — the namespace name encodes the same fact,
+# but not in a way a selector can match on.
+
+apiVersion: v1
+kind: Namespace
+
+metadata:
+  name: petclinic-dev
+
+  labels:
+    app.kubernetes.io/name: petclinic-dev
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: infrastructure
+
+    environment: dev
+
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+
+---
+# The prod namespace is identical except for its name and the `environment`
+# label. The PSA levels do not differ between environments on purpose: dev is
+# where a manifest that would be rejected in prod should be rejected first, and
+# a namespace that enforces less in dev is how a baseline violation reaches prod
+# undiscovered.
+
+apiVersion: v1
+kind: Namespace
+
+metadata:
+  name: petclinic-prod
+
+  labels:
+    app.kubernetes.io/name: petclinic-prod
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: infrastructure
+
+    environment: prod
+
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

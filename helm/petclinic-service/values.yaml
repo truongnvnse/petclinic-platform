@@ -1,0 +1,308 @@
+# values.yaml — chart defaults for helm/petclinic-service/ (E-16)
+#
+# This is the LOWEST-priority layer. Helm merges, last wins:
+#
+#   1. helm/petclinic-service/values.yaml   <- this file
+#   2. helm-values/{service}.yaml           <- per-service (port, image name, env, inits)
+#   3. helm-values/{env}.yaml               <- per-environment (registry, replicas, HPA/PDB)
+#
+# So nothing here should name a service or an environment. Anything that does
+# belongs one or two levels down. The values that ARE here are the ones every
+# service shares and no environment changes: the securityContext, the probe
+# shape, the base resource profile, the label set.
+#
+# Values from docs/technical-spec.md → "Kubernetes Manifests" and
+# "Helm Charts" → "values.yaml Defaults". Deviations from that sketch are
+# called out inline with the reason.
+
+# ---------------------------------------------------------------------------
+# Workload shape
+# ---------------------------------------------------------------------------
+
+# The default, and what every service gets in dev — helm-values/dev.yaml sets
+# `replicaCount: 1` for the whole environment, which needs no exceptions.
+#
+# In prod the number is per-service, because the spec's overlay table gives
+# admin-server 1 and six other services 2, and a single shared env file cannot
+# say both. helm-values/prod.yaml therefore sets no replicaCount at all; the
+# three services without an HPA carry their own figure, and the rest inherit
+# this 1 and never use it.
+#
+# When autoscaling.enabled is true the Deployment omits `replicas` entirely and
+# the HPA owns the field — setting both is the classic cause of a Deployment
+# that snaps back to its template replica count after every HPA scale event.
+replicaCount: 1
+
+# image.registry and image.name are deliberately EMPTY here. They come from
+# helm-values/{env}.yaml and helm-values/{service}.yaml respectively, which is
+# what keeps this chart free of both a service name and an account ID.
+#
+# A render missing one of them still succeeds — the image string is just built
+# from whatever arrived, and the result is valid YAML that applies cleanly and
+# then fails to pull. The shapes to recognise:
+#
+#   no values files   -> image: "/:"
+#   env file only     -> image: "<registry>/:"
+#   service file only -> image: "/<service>:<tag>"
+#
+# Only the last of those reaches a Deployment for a database-backed service; the
+# others fail earlier on the connectionString guard in templates/deployment.yaml.
+# scripts/validate-helm.sh always passes both files.
+image:
+  registry: ""
+  name: ""
+  tag: ""
+  # The task this chart implements (E-8) requires Always on every deployment:
+  # the CI tag is a commit SHA that is pushed once, and a node that has a stale
+  # layer cached under the same tag would otherwise keep running the old build.
+  # docs/technical-spec.md → "Helm Charts" sketches IfNotPresent; Always wins
+  # here because it is the more specific instruction and the failure it prevents
+  # (silently serving an old image) is worse than the pull it costs.
+  pullPolicy: Always
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# app.kubernetes.io/component. The spec's vocabulary is
+# {server|service|gateway|admin}; .claude/rules/kubernetes.md says
+# {backend|frontend|infrastructure}. The spec wins (CLAUDE.md names it the
+# source of infrastructure values) and the one existing manifest that has a
+# component — k8s/base/ingress/ingress.yaml — already uses the spec's `gateway`.
+component: service
+
+# ---------------------------------------------------------------------------
+# Application configuration
+# ---------------------------------------------------------------------------
+
+# Rendered as SPRING_PROFILES_ACTIVE. The `docker` profile is not optional: it
+# is what sets each service's real server.port and points eureka at
+# discovery-server, both from the config repo
+# (spring-petclinic-microservices-config/{service}.yml). Without it the config
+# repo's top-level `server.port: 0` applies and every service binds a random
+# port, so the Service, the probes and the ALB all point at nothing.
+springProfiles: docker
+
+# Extra static environment variables, [{name, value}]. Rendered after
+# SPRING_PROFILES_ACTIVE. Set per service.
+env: []
+
+# Secret-backed environment variables, [{name, secretName, key}]. Rendered as
+# valueFrom.secretKeyRef. The Secret itself is created by an ExternalSecret in
+# k8s/base/external-secrets/ — never inline a value here.
+secrets: []
+
+# Containers that block the app container until its dependencies answer. Set
+# per service; the chain is fixed by docs/technical-spec.md → "Init Containers":
+# config-server waits for nothing, discovery-server waits for config-server,
+# everything else waits for both.
+initContainers: []
+
+# Small on purpose: an init container is a wget loop, and the pod's effective
+# request is max(sum(containers), max(initContainers)), so a request larger than
+# the app container's would become the pod's floor.
+initContainerResources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+# Non-secret configuration. Rendered as a ConfigMap and consumed with envFrom,
+# so every key becomes an environment variable of the same name.
+#
+# Values here go through `tpl`, so a service file may write
+# `"{{ .Values.database.connectionString }}"` and have it resolved against the
+# fully-merged values — which is what lets the per-service files (which cannot
+# know an environment) reference the per-environment ones (which cannot know a
+# service).
+configMap:
+  enabled: true
+  data: {}
+
+# The RDS endpoint. Empty here because it names a host, and a host belongs to an
+# environment: helm-values/{dev,prod}.yaml set it from that environment's
+# `terraform output -raw rds_connection_string`. The three DB-backed services
+# reference it from their configMap.data as SPRING_DATASOURCE_URL.
+#
+# A full JDBC URL rather than host/port/name parts, because that is the shape
+# terraform already emits and the shape spring.datasource.url wants — splitting
+# it would only add a way to reassemble it wrong.
+database:
+  connectionString: ""
+
+serviceAccount:
+  create: true
+  # Defaults to the release name (= the service name). No service needs AWS
+  # permissions of its own — ESO writes the Secrets they read, so they never
+  # call the AWS API. Leave annotations empty unless that changes.
+  name: ""
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+
+service:
+  type: ClusterIP
+  # Set per service from the Service Inventory table. Also the container port —
+  # the two are never different for these eight services, and splitting them
+  # would only create a way to get them out of sync.
+  port: 8080
+  # Named so the probes and the Service targetPort refer to it by name; changing
+  # the port then moves all three together.
+  portName: http
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+
+# Pod-level. Matches docs/technical-spec.md → "SecurityContext" plus the
+# seccompProfile the E-8 task requires. RuntimeDefault is the only profile that
+# works on the Graviton nodes without a custom profile being loaded.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level. readOnlyRootFilesystem stays false: Spring Boot writes to
+# /tmp for multipart uploads and its own cache, and the spec calls that out.
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Probes
+# ---------------------------------------------------------------------------
+
+# Timings from docs/technical-spec.md → "Health Probes (All Services)".
+#
+# initialDelaySeconds is 0 on all three, including liveness. The spec's
+# values.yaml sketch shows 30/60, which predates the startupProbe: a liveness
+# probe cannot run until the startupProbe has succeeded, so the startup budget
+# (30 x 10s = 5 minutes) already is the grace period, and a second delay on top
+# of it would only postpone the first readiness success.
+#
+# startupProbe hits /actuator/health on every service, including config-server.
+# readiness/liveness hit the Kubernetes probe endpoints, which Spring Boot
+# enables automatically when it detects it is running in a pod — the pod's
+# KUBERNETES_SERVICE_HOST is what triggers that.
+#
+# config-server overrides readiness and liveness back to /actuator/health in
+# helm-values/config-server.yaml. Not because its health groups are missing —
+# they come from that same auto-detection — but because they are unreachable:
+# the Config Server's own /{application}/{profile}[/{label}] controller matches
+# every two- and three-segment path, so /actuator/health/readiness is answered as
+# a config lookup for the label `readiness`, which does not exist, and 404s. The
+# README's "Probes" section has the measured paths.
+probes:
+  startup:
+    enabled: true
+    path: /actuator/health
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30
+  readiness:
+    enabled: true
+    path: /actuator/health/readiness
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  liveness:
+    enabled: true
+    path: /actuator/health/liveness
+    initialDelaySeconds: 0
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+
+# From docs/technical-spec.md → "Resource Requests and Limits": every service is
+# 100m/500m, 128Mi/512Mi except api-gateway at 200m/1000m. The 512Mi limit is
+# headroom for a Spring Boot heap that idles around 200-300Mi.
+#
+# The 128Mi request is deliberately NOT read as "these services fit on a 2 GiB
+# node". It is a scheduling hint and it sits far below resident usage, so the
+# scheduler will place more services on a node than that node can hold — which is
+# how a t4g.small node was lost on 2026-10-11, with four JVMs packed onto 1365 MiB
+# of allocatable memory on the strength of `4 x 128Mi = 512Mi`. Node sizing is
+# what fixes that, not this value; see docs/technical-spec.md → "Managed Node
+# Group". Raising the request toward the real figure would spread the pods
+# correctly but fit fewer per node.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+
+# Spreads the petclinic pods evenly across nodes.
+#
+# The labelSelector is the whole point of this block, and it is deliberately NOT
+# the chart's per-service selectorLabels. A topology spread constraint counts the
+# pods its own selector matches, and dev runs one replica per service — so a
+# constraint selecting only this Deployment's pods would count one pod, find the
+# skew always zero, and do nothing whatsoever. Selecting `part-of: petclinic`
+# instead puts all eight services on one budget, which is the actual problem.
+#
+# Measured on 2026-10-11, after the node group moved to t4g.medium: the scheduler
+# put seven of the eight services on one node and one on the other. That node held
+# 2898 MiB of its 3288 MiB with memory limits 168% overcommitted. The reason is
+# the 128Mi request above — a scheduling hint far below the ~350 MiB these JVMs
+# actually hold — so the scheduler read a node carrying seven JVMs as 41% full.
+# This constraint corrects the placement without pretending the request is honest:
+# it balances pod *count*, which is the thing requests cannot.
+#
+# ScheduleAnyway, not DoNotSchedule. A hard constraint leaves pods Pending when
+# the node count is not what the chart assumes, which turns a placement preference
+# into an outage; a soft one is a hint the scheduler can always satisfy.
+#
+# It is also the right behaviour in prod, where it is what puts a service's two
+# replicas on different nodes.
+#
+# An empty list disables the constraint entirely.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: petclinic
+
+# ---------------------------------------------------------------------------
+# Autoscaling and disruption
+# ---------------------------------------------------------------------------
+
+# Both are off by default and turned on per service, because the spec's HPA and
+# PDB tables list specific services rather than "all" — config-server and
+# discovery-server have no HPA, and genai-service and admin-server have no PDB.
+# helm-values/dev.yaml turns both off for everything; helm-values/prod.yaml
+# leaves the per-service values alone.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+podAnnotations: {}

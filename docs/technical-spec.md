@@ -158,6 +158,7 @@ Four security groups per environment. Security groups are the **primary access c
 | Inter-node communication | Ingress | All | All | Self (EKS Node SG) |
 | Kubelet API from cluster | Ingress | TCP | 10250 | EKS Cluster SG |
 | NodePort services | Ingress | TCP | 30000-32767 | ALB SG |
+| Health checks from ALB | Ingress | TCP | 8080 | ALB SG |
 | All outbound | Egress | All | All | `0.0.0.0/0` |
 
 ### RDS Security Group
@@ -166,6 +167,7 @@ Four security groups per environment. Security groups are the **primary access c
 |------|------|----------|------|--------------------|
 | MySQL from nodes | Ingress | TCP | 3306 | EKS Node SG |
 | No other ingress | — | — | — | — |
+| All outbound | Egress | All | All | `0.0.0.0/0` |
 
 **Critical:** RDS SG allows `3306` from EKS Node SG **only**. Never `0.0.0.0/0`.
 
@@ -208,7 +210,7 @@ Created from EKS cluster identity issuer URL. Required for IRSA (IAM Roles for S
 | Parameter | Dev | Prod |
 |-----------|-----|------|
 | Node Group Name | `petclinic-dev-nodes` | `petclinic-prod-nodes` |
-| Instance Types | `["t4g.small"]` | `["t4g.small"]` |
+| Instance Types | `["t4g.medium"]` | `["t4g.small"]` — **needs correcting, see below** |
 | Architecture | ARM64 (Graviton) | ARM64 (Graviton) |
 | Capacity Type | `ON_DEMAND` (free trial until Dec 2026) | `ON_DEMAND` (free trial until Dec 2026) |
 | Min Size | 2 | 2 |
@@ -217,7 +219,16 @@ Created from EKS cluster identity issuer URL. Required for IRSA (IAM Roles for S
 | Disk Size | 20 GB | 20 GB |
 | AMI Type | `AL2_ARM_64` | `AL2_ARM_64` |
 
-> **Cost note:** t4g.small instances (2 vCPU, 2 GiB) are eligible for the AWS Graviton free trial (750 hrs/month until Dec 2026). Both dev and prod use identical sizing — this is a cost optimization for a learning project. In production, you would use larger instances (e.g., m7g.xlarge). Students should understand this trade-off.
+> **Cost note:** t4g.small instances (2 vCPU, 2 GiB) are eligible for the AWS Graviton free trial (750 hrs/month until 31 Dec 2026). t4g.medium is **not** trial-eligible. The 750 hours are a monthly total rather than per instance, so two t4g.small nodes running 24/7 consume 1460 hours and are not fully free — see the cost table below.
+
+> **Sizing correction (2026-10-11).** Dev originally used `["t4g.small"]` as this table said, and it could not run the eight services. Two independent limits, both measured on a live cluster:
+>
+> 1. **Pod cap.** A t4g.small node accepts 11 pods — 3 ENIs × 4 IPv4 gives `(3 × (4 − 1)) + 2 = 11`, and the node reported `allocatable.pods: 11`. Two nodes is 22 slots, and the system pods take 15 (kube-system 12 + external-secrets 3), leaving 7 for 8 services. `admin-server` sat `Pending` with `0/2 nodes are available: 2 Too many pods` while both nodes sat at 48% CPU. This table's arithmetic had left the system pods out.
+> 2. **Memory.** A t4g.small node reports 1365 MiB allocatable. The 128Mi request is far below what a Spring Boot service holds resident (~350 MiB), so the scheduler packed four JVMs onto one node believing there was room. That node's kubelet stopped posting status and never recovered; the EC2 instance stayed `running` with both status checks ok. Requests fit at 988Mi/1365Mi — the resident set did not.
+>
+> Dev is now `["t4g.medium"]`: 17 pods per node (3 ENIs × 6 IPv4) so 34 slots against the 23 needed, and 4096 MiB per node. Same 2 vCPU — the cost buys memory and pod slots, not compute. Prefix delegation would raise the pod cap for free but does nothing for memory, which is the limit that actually killed the node.
+>
+> Prod is left at `["t4g.small"]` here only because it has not been deployed yet. It needs the same correction first: prod runs 16 service replicas, so 16 + 15 system pods = 31 against the same 22-slot ceiling. In production you would use larger instances (e.g., m7g.xlarge) regardless.
 
 ### Node IAM Role Policies
 
@@ -319,17 +330,21 @@ ECR Private: 500 MB free tier, then $0.10/GB/month. With 8 services at ~200 MB e
 | Instance Class | `db.t4g.micro` | `db.t4g.micro` |
 | Multi-AZ | `false` | `false` (single-AZ, cost optimization for learning) |
 | Allocated Storage | 20 GB | 20 GB |
-| Max Allocated Storage (autoscaling) | 20 GB | 20 GB |
+| Max Allocated Storage (autoscaling) | 100 GB | 100 GB |
 | Storage Type | `gp2` | `gp2` |
 | Storage Encrypted | `true` (AWS default KMS key) | `true` (AWS default KMS key) |
-| Backup Retention | 7 days | 7 days |
-| Skip Final Snapshot | `true` | `true` |
+| Backup Retention | 7 days | 30 days |
+| Skip Final Snapshot | `true` | `false` |
 | Deletion Protection | `false` | `false` |
-
-> **Cost note:** db.t4g.micro (2 vCPU, 1 GiB) is AWS RDS free tier eligible (750 hrs/month for 12 months, 20 GB gp2 storage). Both dev and prod use identical sizing — this is a cost optimization for a learning project. In production, you would use db.r7g.large or higher with Multi-AZ, gp3 storage, 30-day backups, deletion protection, and a final snapshot. Students should understand these implications.
 | DB Identifier | `petclinic-dev-mysql` | `petclinic-prod-mysql` |
 | Master Username | `petclinic` | `petclinic` |
 | Master Password | Generated via `random_password` | Generated via `random_password` |
+
+> **Cost note:** db.t4g.micro (2 vCPU, 1 GiB) is AWS RDS free tier eligible (750 hrs/month for 12 months, 20 GB gp2 storage). Both dev and prod use identical sizing — this is a cost optimization for a learning project. In production, you would use db.r7g.large or higher with Multi-AZ, gp3 storage, 30-day backups, deletion protection, and a final snapshot. Students should understand these implications.
+
+> **Max Allocated Storage:** this table previously specified 20 GB, equal to the allocated storage. RDS rejects that — the maximum storage threshold must be at least 10% above the allocated storage, or instance creation fails with `Invalid max storage size for engine_name`. It was raised to 100 GB, which also satisfies PETPLAT-22's "autoscaling enabled" criterion. The ceiling costs nothing on its own: storage is billed on what is allocated, not on the maximum, so this bounds a runaway rather than reserving capacity.
+
+> **Backup Retention / Skip Final Snapshot:** this table previously read 7 days / `true` for prod, which disagreed with the PETPLAT-22 acceptance criteria (30 days, `false`). The acceptance criteria govern, and the module was built to them, so the table now matches what is deployed. `terraform/modules/rds/variables.tf` records the same resolution.
 
 ### Parameter Group
 
@@ -407,20 +422,33 @@ RDS credentials are created by the RDS module with `random_password` (16+ chars,
 
 | Parameter | Value |
 |-----------|-------|
-| Installation | kubectl apply (CRDs + controller) |
+| Version | `v2.12.0` (pinned) |
+| Installation | `scripts/install-eso.sh` — downloads the upstream release bundle, renders it with Kustomize, applies with `kubectl apply --server-side` |
 | Namespace | `external-secrets` |
+| CRD API Version | `external-secrets.io/v1` |
 | Store Type | `ClusterSecretStore` |
 | Provider | AWS Secrets Manager |
 | Auth | IRSA (see [IRSA Roles](#irsa-roles)) |
 
+Two installation details are load-bearing and both fail in ways that do not name their cause:
+
+- **`--server-side` is required.** `clustersecretstores.external-secrets.io` and `secretstores.external-secrets.io` are ~720 KB each, over the 262,144-byte annotation cap that client-side apply uses for `kubectl.kubernetes.io/last-applied-configuration`. Without the flag the apply aborts partway with `metadata.annotations: Too long`, leaving a half-installed operator. Upstream's own docs mandate server-side apply for this reason.
+- **The release bundle hardcodes `namespace: default` in 19 places** — 16 YAML fields (rewritten by Kustomize's namespace transformer) and 3 container args (`--service-namespace`, `--secret-namespace`, `--dns-name`) that no namespace transformer can see, because they are not namespace fields. `kubectl apply -n external-secrets` does not override them; it errors. Leaving the args in place stops the cert-controller and webhook pods from ever becoming Ready. `scripts/install-eso.sh` substitutes all three and asserts the result.
+
+**API version:** `v1`, not `v1beta1`. The operator this project pins declares `v1beta1: served: false`, so a manifest written against the older version fails with `no matches for kind ... ensure CRDs are installed first` even though the CRDs are installed and healthy.
+
 ### ClusterSecretStore Configuration
 
 ```yaml
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: aws-secrets-manager
 spec:
+  conditions:
+    - namespaceRegexes:
+        - "^petclinic-dev$"
+        - "^petclinic-prod$"
   provider:
     aws:
       service: SecretsManager
@@ -431,6 +459,8 @@ spec:
             name: external-secrets-sa
             namespace: external-secrets
 ```
+
+`spec.conditions` restricts which namespaces may reference the store. A `ClusterSecretStore` is cluster-scoped, so without it any namespace in the cluster — including one created by a compromised workload — can read the RDS master password and the OpenAI key. `namespaceRegexes` is used rather than `namespaceSelector` because the `petclinic-{env}` namespaces are created out of band and carry only the automatic `kubernetes.io/metadata.name` label.
 
 ### ExternalSecret Manifests
 
@@ -453,10 +483,15 @@ spec:
 
 | Field | Value |
 |-------|-------|
+| `secretStoreRef.name` | `aws-secrets-manager` |
+| `secretStoreRef.kind` | `ClusterSecretStore` |
 | `refreshInterval` | `1h` |
 | `target.name` | `openai-api-key` |
 | `data[0].secretKey` | `OPENAI_API_KEY` |
 | `data[0].remoteRef.key` | `petclinic/{env}/openai-api-key` |
+| `data[0].remoteRef.property` | *(absent — the remote value is plaintext)* |
+
+`remoteRef.property` is present on the RDS entries and absent here, and that is determined by the shape of the remote secret, not by preference: the RDS secret is a JSON object with two fields, the OpenAI secret is a single plaintext string. The two mistakes are not symmetric — a `property` on a plaintext secret fails loudly (ESO reports it cannot parse the value as JSON), while omitting `property` on a JSON secret fails **quietly**, copying the whole blob into the key so the application receives JSON where it expects a credential.
 
 ---
 
@@ -614,7 +649,31 @@ The startupProbe runs first and disables readiness and liveness checks until Spr
 | genai-service | 100m | 500m | 128Mi | 512Mi |
 | admin-server | 100m | 500m | 128Mi | 512Mi |
 
-API Gateway gets higher CPU (200m/1000m) because it handles all incoming traffic routing. Memory requests are set to 128Mi (with 512Mi limit) to fit on t4g.small nodes (2 GiB RAM). Spring Boot services idle around 200-300 MiB — the 512Mi limit provides headroom for spikes.
+API Gateway gets higher CPU (200m/1000m) because it handles all incoming traffic routing. Spring Boot services idle around 200-300 MiB — the 512Mi limit provides headroom for spikes.
+
+**The 128Mi request is a scheduling hint, not a usage estimate, and the gap between the two is load-bearing.** The scheduler places pods by request, so 128Mi tells it a node can hold many more services than the node can actually keep resident. On t4g.small that gap is what lost a node: four JVMs were packed onto one 1365 MiB node on the strength of `4 × 128Mi = 512Mi`, while their resident set was closer to 1.4 GiB. Raising the request toward the real figure (~350Mi) would make the scheduler spread correctly, at the cost of fitting fewer services per node — which is why the fix applied was larger nodes rather than a larger request.
+
+This is also why the request must not be read as "these services fit on 2 GiB nodes". They do not; see the sizing correction under "Managed Node Group".
+
+### Pod Placement (Topology Spread)
+
+Because the request above understates real usage, the scheduler cannot be trusted to balance the eight services by itself — and on 2026-10-11 it did not: it placed seven of them on one node and one on the other. `helm/petclinic-service/` therefore carries a topology spread constraint:
+
+```yaml
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: petclinic
+```
+
+The `labelSelector` is what makes it work, and it is deliberately not the chart's per-service selector. A spread constraint counts only the pods its own selector matches, and dev runs one replica per service — a selector naming just this Deployment would count a single pod, always find a skew of zero, and do nothing at all. `part-of: petclinic` puts all eight services on one budget, which is the constraint actually being expressed.
+
+`ScheduleAnyway` rather than `DoNotSchedule`: a hard constraint leaves pods Pending whenever the node count is not what the chart assumes, turning a placement preference into an outage. A soft one is a hint the scheduler can always satisfy.
+
+Note what this does and does not fix. It balances pod *count*, which is the thing requests cannot do; it does not make the requests honest, and a node holding four JVMs still reports itself as well under 20% requested. It is also the behaviour prod wants, where it is what separates a service's two replicas onto different nodes.
 
 ### Environment Variables per Service
 
@@ -748,7 +807,7 @@ Environment-specific configuration is managed via Helm values files in `helm-val
 - Per-service files hold service-specific config (ports, env vars, init containers)
 - ArgoCD merges service + environment values when deploying
 
-> **Note:** The `k8s/overlays/` directory remains for namespace manifests and external-secrets CRs that are not Helm-managed. See [Helm Charts](#helm-charts) for the full chart structure.
+> **Note:** Manifests that are not Helm-managed live under `k8s/base/` — the External Secrets CRs (`ClusterSecretStore`, `ServiceAccount`, and the two `ExternalSecret`s) in `k8s/base/external-secrets/`, and the ALB Ingress in `k8s/base/ingress/`. There is no `k8s/overlays/`; per-environment variation is handled by Helm values files, not Kustomize overlays. See [Helm Charts](#helm-charts) for the full chart structure and [Secrets Management](#secrets-management) for the ExternalSecret manifests.
 
 ---
 
@@ -939,11 +998,18 @@ Five IAM Roles for Service Accounts, each with OIDC trust policy scoped to a spe
 
 | Role Name Pattern | K8s ServiceAccount | Namespace | IAM Policy | Used By |
 |-------------------|--------------------|-----------|------------|---------|
-| `petclinic-{env}-eso-role` | `external-secrets-sa` | `external-secrets` | `secretsmanager:GetSecretValue`, `secretsmanager:DescribeSecret` on `arn:aws:secretsmanager:eu-central-1:{account}:secret:petclinic/*` | ESO |
+| `petclinic-{env}-eso-role` | `external-secrets-sa` | `external-secrets` | `secretsmanager:GetSecretValue`, `secretsmanager:DescribeSecret` on `arn:aws:secretsmanager:eu-central-1:{account}:secret:petclinic/{env}/*` | ESO |
 | `petclinic-{env}-lb-controller-role` | `aws-load-balancer-controller` | `kube-system` | AWS Load Balancer Controller IAM policy (managed) | ALB Controller |
 | `petclinic-{env}-ebs-csi-role` | `ebs-csi-controller-sa` | `kube-system` | `AmazonEBSCSIDriverPolicy` (AWS managed) | EBS CSI Driver |
 | `petclinic-{env}-argocd-role` | `argocd-server` | `argocd` | Minimal: only needed if ArgoCD accesses AWS resources directly (optional) | ArgoCD |
 | `petclinic-{env}-karpenter-role` | `karpenter` | `kube-system` | Karpenter controller policy: `ec2:*`, `iam:PassRole`, `ssm:GetParameter`, `pricing:GetProducts`, `sqs:*`, `eks:DescribeCluster` (scoped) | Karpenter |
+
+**ESO role scope.** The policy resource carries the environment segment — `petclinic/{env}/*`, not `petclinic/*`. Both environments live in a single AWS account, so the broader pattern would let the dev cluster's operator read prod's database password and OpenAI key, turning a dev-cluster compromise into a prod credential leak. The narrower form costs nothing, because no ExternalSecret in either environment reads the other's prefix.
+
+Two permissions are deliberately absent:
+
+- **`secretsmanager:ListSecrets`** — needed only for `dataFrom.find` lookups, which no manifest here uses; every ExternalSecret names its `remoteRef.key` explicitly. It is also not required for the ClusterSecretStore to report `Ready`: the store's validation path calls `Credentials.Retrieve()` and nothing else.
+- **`kms:Decrypt`** — the secrets are encrypted with the AWS-managed `aws/secretsmanager` key, where the decrypt permission belongs to the service rather than the caller. Attaching it would widen the role for no effect. **If a customer-managed KMS key is ever introduced, this role needs `kms:Decrypt` on that key at the same time** — see [Security Controls](#security-controls) → Encryption Matrix.
 
 ### IRSA Trust Policy Template
 
@@ -1011,7 +1077,8 @@ This is a learning project. Instance choices maximize AWS free tier eligibility.
 | Resource | Dev (~) | Prod (~) | Free Tier |
 |----------|---------|----------|-----------|
 | EKS Control Plane | $73 | $73 | None — unavoidable cost |
-| EC2 Nodes (2x t4g.small) | $0 | $0 | Graviton free trial (750 hrs/mo until Dec 2026) |
+| EC2 Nodes — dev 2x t4g.medium | $56 | $56 | None — t4g.medium is not trial-eligible |
+| EC2 Nodes — prod 2x t4g.small | $14 | $14 | Graviton free trial covers 750 of the 1460 hrs/mo; the remaining 710 hrs bill at $0.0192 |
 | RDS MySQL (db.t4g.micro) | $0 | $0 | RDS free tier (750 hrs/mo, 12 months) |
 | ALB | $0 | $0 | Free tier (750 hrs/mo, 12 months) |
 | S3 + DynamoDB (state) | $1 | $1 | Mostly free tier |
@@ -1020,9 +1087,9 @@ This is a learning project. Instance choices maximize AWS free tier eligibility.
 | Route 53 | $1 | $1 | $0.50/zone + queries |
 | Secrets Manager | $1 | $1 | $0.40/secret/month (~3 secrets) |
 | Data Transfer | $1 | $1 | 100 GB/mo free |
-| **Total** | **~$80/mo** | **~$80/mo** | EKS control plane is the main cost |
+| **Total (24/7)** | **~$136/mo** | **~$94/mo** | EKS control plane plus nodes |
 
-> **Students should `terraform destroy` after each session** to minimize EKS control plane charges. At $0.10/hr, running EKS for 10 hours/week = ~$17/month. Target: **entire course under $50 AWS spend.**
+> **Students should `terraform destroy` after each session.** The figures above assume 24/7 operation, which is the worst case and not how this environment is meant to be used. Node cost scales with uptime alongside the control plane, and dev nodes are no longer free-tier eligible: at 10 hours/week (40 hrs/month) dev costs about $4.00 for the control plane plus $3.07 for 2× t4g.medium, against ~$136/month left running. The free trial still covers t4g.small up to 750 hrs/month, so an environment that keeps t4g.small nodes and runs part-time can stay at $0 for compute. Target: **entire course under $50 AWS spend.**
 
 No NAT Gateway cost ($0 saved vs ~$35-65/mo with NAT).
 
@@ -1182,7 +1249,7 @@ Uses `aws_ecr_repository` with lifecycle policies, scan-on-push, and configurabl
 | `security_group_id` | string | RDS security group ID | — |
 | `instance_class` | string | RDS instance class | `"db.t4g.micro"` |
 | `allocated_storage` | number | Initial storage in GB | `20` |
-| `max_allocated_storage` | number | Max autoscale storage in GB | `20` |
+| `max_allocated_storage` | number | Max autoscale storage in GB — RDS requires at least 10% above `allocated_storage` | `100` |
 | `multi_az` | bool | Multi-AZ deployment | `false` |
 | `backup_retention_period` | number | Backup retention in days | `7` |
 | `skip_final_snapshot` | bool | Skip final snapshot on delete | `true` |
@@ -1221,12 +1288,26 @@ Uses `aws_secretsmanager_secret` and `aws_secretsmanager_secret_version` resourc
 |---------------|------|-------------|---------|
 | `project` | string | Project name | `"petclinic"` |
 | `environment` | string | Environment | — |
-| `openai_api_key` | string | OpenAI API key value | — (sensitive) |
+| `openai_api_key` | string | OpenAI API key value (≥20 chars). **`sensitive` + `ephemeral`** | `""` |
+| `openai_api_key_version` | number | Revision counter; bump to push a changed key | `1` |
+| `secret_recovery_window_in_days` | number | Recovery window; `0` deletes immediately | `0` |
 | `tags` | map(string) | Additional tags | `{}` |
 
 | Output | Type | Description |
 |--------|------|-------------|
+| `openai_secret_name` | string | Secrets Manager secret name (`petclinic/{env}/openai-api-key`) |
 | `openai_secret_arn` | string | Secrets Manager ARN for OpenAI API key |
+| `openai_secret_version_id` | string | Current secret version ID — confirms a rotation without printing the value |
+
+**Requires Terraform ≥ 1.11.0**, higher than the other modules' 1.6.0 floor, because it uses write-only arguments.
+
+**The key never reaches `terraform.tfstate` or `plan.out`.** The version resource writes `secret_string_wo` rather than `secret_string`: the value is handed to the provider during apply and then discarded, so neither file ever holds it. `sensitive = true` alone would not achieve this — it redacts a value from terminal output but still stores it verbatim in both files, and this project's documented workflow saves a plan and applies from it, so the key would otherwise sit in plaintext in `plan.out` for as long as that file exists. The variable is declared `ephemeral = true` at both the module and the environment root, so the value is not persisted at the root either.
+
+The cost of that guarantee is that Terraform cannot read the value back and therefore cannot notice that it changed. **Rotating is a two-field edit:** the new value in `terraform.tfvars`, plus `openai_api_key_version` bumped in `terraform/environments/{env}/main.tf`. Changing the key alone produces an empty plan and leaves the old value in Secrets Manager. See `k8s/base/external-secrets/README.md` → Rotating a secret.
+
+**A blank key is rejected at plan time, but teardown does not require one.** The check lives in a `lifecycle.precondition` on the secret version, not in the variable's `validation` block, and the variable defaults to `""`. The distinction is not stylistic: `terraform destroy` **evaluates variable validations and skips resource preconditions**, so a required variable — or a validation that rejects `""` — blocks destroying the entire environment over a value destroy never reads. Dev is torn down and rebuilt routinely to save cost, so that would tax the normal path. The precondition fires on create and update, where the guarantee matters, and is skipped on destroy.
+
+`secret_recovery_window_in_days` overrides the AWS default of 30. A deleted secret is only *scheduled* for deletion, and its name cannot be reused until the window elapses — so the default breaks the dev destroy/rebuild cycle outright, and dev sets `0`. Prod sets `7`, where a rebuild is not routine and reversibility of a mistake is worth more.
 
 Note: RDS credentials are NOT managed by this module — they are in the `rds` module (PETPLAT-23).
 

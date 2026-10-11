@@ -1,0 +1,52 @@
+{{/*
+configmap.yaml — non-secret configuration for one service (PETPLAT-39, PETPLAT-41)
+
+Consumed by the Deployment with `envFrom`, so each key becomes an environment
+variable of the same name. That is why the keys here are SCREAMING_SNAKE and
+match Spring Boot's relaxed binding for the property they set:
+SPRING_DATASOURCE_URL binds to spring.datasource.url, and so on.
+
+What may go in here: URLs, ports, the JDBC endpoint, the Config Server's git
+repo. What may not: anything that would be embarrassing in `kubectl get cm -o
+yaml`. Credentials live in Secrets created by the ExternalSecrets in
+k8s/base/external-secrets/ and are referenced through .Values.secrets — see
+k8s/base/external-secrets/README.md.
+
+The Deployment carries a checksum of this file, so editing it rolls the pods.
+*/}}
+{{- if .Values.configMap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: {{ include "petclinic-service.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+
+  labels:
+    {{- include "petclinic-service.labels" . | nindent 4 }}
+
+  {{- with .Values.configMap.data }}
+  {{- /*
+  Cross-file consistency check. The per-service values files cannot know an
+  environment, so the RDS endpoint arrives through helm-values/{env}.yaml — and
+  a service file that consumes it can be rendered against an env file that never
+  set it. The result would be `SPRING_DATASOURCE_URL: ""`, which renders, applies
+  and passes every dry run, then fails at pod start as a Hikari pool error naming
+  a property rather than the file that left it empty.
+
+  The signal is the key itself: a service file that consumes the endpoint is a
+  service file that sets this variable, so its presence is the trigger. That
+  avoids a second flag to keep in sync with the first.
+
+  `required` lives here rather than inline in the values file because this is a
+  template action on the merged values, not a string inside the rendered
+  document — `toYaml` folds long scalars across lines, and a template action
+  split mid-string does not parse.
+  */}}
+  {{- if hasKey . "SPRING_DATASOURCE_URL" }}
+  {{- $_ := required "database.connectionString is empty — set it in helm-values/{dev,prod}.yaml from `terraform output -raw rds_connection_string`" $.Values.database.connectionString }}
+  {{- end }}
+data:
+  {{- tpl (toYaml .) $ | nindent 2 }}
+  {{- end }}
+{{- end }}

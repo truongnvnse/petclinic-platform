@@ -1,0 +1,54 @@
+{{/*
+hpa.yaml — HorizontalPodAutoscaler (PETPLAT-47)
+
+Rendered only when autoscaling.enabled is true, which is set in the per-service
+values file rather than in helm-values/prod.yaml: the spec's HPA table names five
+services (api-gateway, customers, visits, vets, genai) and leaves config-server,
+discovery-server and admin-server out. An environment file cannot express that —
+it is merged last, so a single `enabled: true` there would apply to all eight.
+helm-values/dev.yaml turns it off for everything, which is the one case that IS
+uniform.
+
+autoscaling/v2 rather than v1: the v1 API only carries a single CPU target and
+has been deprecated since Kubernetes 1.23; the cluster is on 1.36.
+
+Note the pairing with the Deployment — when this object exists the Deployment
+omits `replicas` on purpose, so the two never write the same field.
+
+Metrics Server is a prerequisite and is NOT installed on this cluster yet
+(PETPLAT-72). Until it is, an HPA created by this template reports
+`<unknown>/70%` and never scales — it does not error, which is what makes it
+worth checking `kubectl get hpa` after the first prod sync rather than assuming
+a created object is a working one.
+*/}}
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+
+metadata:
+  name: {{ include "petclinic-service.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+
+  labels:
+    {{- include "petclinic-service.labels" . | nindent 4 }}
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "petclinic-service.fullname" . }}
+
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Utilization is a percentage of the container's CPU REQUEST, not of
+          # the limit or of the node. With the spec's 100m request, 70% means
+          # the HPA adds a pod once a service is averaging 70m.
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

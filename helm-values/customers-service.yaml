@@ -1,0 +1,93 @@
+# customers-service.yaml — Customers Service (PETPLAT-41)
+#
+# Merged as: helm/petclinic-service/values.yaml → this file → helm-values/{env}.yaml
+#
+# One of the three RDS-backed services. Owners and pets; visits-service holds a
+# foreign key into it, so customers has to be up first (see PETPLAT-48's
+# verification order — the startup chain in these manifests does not encode that
+# dependency, because both services only need the database, not each other).
+
+fullnameOverride: customers-service
+
+component: service
+
+image:
+  name: customers-service
+  tag: "v1.0.0"
+
+service:
+  port: 8081
+
+# `mysql` is what switches the service off HSQLDB and onto the RDS instance.
+# Without it the service starts perfectly well and writes to an in-memory
+# database, which looks like success until the pod restarts and the data is
+# gone.
+springProfiles: docker,mysql
+
+initContainers:
+  - name: wait-for-config-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://config-server:8888/actuator/health; do sleep 5; done']
+
+  - name: wait-for-discovery-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://discovery-server:8761/actuator/health; do sleep 5; done']
+
+secrets:
+  # Both keys come from the `rds-credentials` Secret that the ExternalSecret in
+  # k8s/base/external-secrets/rds-credentials.yaml keeps in sync with
+  # petclinic/{env}/rds-credentials in Secrets Manager. The value is never
+  # written here — only the reference.
+  #
+  # Env vars rather than a JDBC URL fragment on purpose: the generated password
+  # contains characters (`#`, `)`) that a URL parser would treat as delimiters,
+  # so interpolating it into the connection string would truncate it in a way
+  # that only shows up as an authentication failure.
+  - name: SPRING_DATASOURCE_USERNAME
+    secretName: rds-credentials
+    key: username
+
+  - name: SPRING_DATASOURCE_PASSWORD
+    secretName: rds-credentials
+    key: password
+
+configMap:
+  data:
+    CONFIG_SERVER_URL: http://config-server:8888
+
+    # Resolved through `tpl` against helm-values/{env}.yaml, because the RDS
+    # hostname is per-environment and this file is not. The value there is the
+    # one terraform/environments/{env} outputs as `rds_connection_string` —
+    # re-read it with `terraform output -raw rds_connection_string` after any
+    # rebuild, because the hostname changes whenever the instance is recreated.
+    #
+    # This env var is what beats the `mysql` profile's own
+    # `jdbc:mysql://localhost:3306/petclinic`: the config repo sets
+    # spring.cloud.config.override-none=true, which puts remote configuration at
+    # the LOWEST priority, so an environment variable always wins.
+    #
+    #
+    # Interpolated rather than guarded here: templates/configmap.yaml treats the
+    # presence of this key as the signal that the service is database-backed and
+    # fails the render if database.connectionString is empty. Doing it there
+    # rather than inline keeps the check out of a string that `toYaml` may fold
+    # across lines, which a template action cannot survive.
+    SPRING_DATASOURCE_URL: "{{ .Values.database.connectionString }}"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

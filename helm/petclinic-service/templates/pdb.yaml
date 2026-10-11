@@ -1,0 +1,39 @@
+{{/*
+pdb.yaml — PodDisruptionBudget (PETPLAT-46)
+
+Rendered only when podDisruptionBudget.enabled is true, set per service. The
+spec's PDB table lists six services — config-server, discovery-server,
+api-gateway, customers, visits, vets — and omits genai-service and admin-server,
+so this cannot be a single environment-wide switch.
+
+minAvailable rather than maxUnavailable, because it is the one that stays correct
+when the replica count changes: "one of these must always be running" reads the
+same at 2 replicas and at 6, whereas "at most one may be down" does not.
+
+A PDB constrains voluntary disruption only — node drains, cluster upgrades,
+`kubectl drain`. It does nothing about a node dying, and it cannot stop a
+rolling update, which is why the Deployment sets maxUnavailable: 0 separately.
+
+Note the interaction with a single-replica deployment: with minAvailable 1, a
+node drain cannot evict the only pod, so the drain blocks until a replacement is
+scheduled somewhere. That is the intended behaviour, but it means dev (1 replica,
+PDB off) and prod (2 replicas, PDB on) behave differently during maintenance.
+*/}}
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+
+metadata:
+  name: {{ include "petclinic-service.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+
+  labels:
+    {{- include "petclinic-service.labels" . | nindent 4 }}
+
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+
+  selector:
+    matchLabels:
+      {{- include "petclinic-service.selectorLabels" . | nindent 6 }}
+{{- end }}

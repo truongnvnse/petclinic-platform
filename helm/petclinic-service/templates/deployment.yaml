@@ -1,0 +1,190 @@
+{{/*
+deployment.yaml — the workload for one petclinic service (PETPLAT-39 … PETPLAT-44)
+
+Everything service-specific arrives through values: the port and image name from
+helm-values/{service}.yaml, the registry and replica count from
+helm-values/{env}.yaml. If a service name ever appears in this file, the thing
+that needed it belonged in a values file instead.
+
+The three pieces that make the startup order work are all here: the init
+containers that block until a dependency answers, the startupProbe that keeps
+liveness from killing a JVM that is still booting, and the readinessProbe that
+keeps the Service from sending traffic to one.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: {{ include "petclinic-service.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+
+  labels:
+    {{- include "petclinic-service.labels" . | nindent 4 }}
+
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  # Omitted entirely when the HPA owns the field. Setting it anyway is the
+  # usual reason an HPA scales up and the Deployment snaps straight back.
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+
+  selector:
+    matchLabels:
+      {{- include "petclinic-service.selectorLabels" . | nindent 6 }}
+
+  # maxUnavailable 0 because a Spring Boot service here takes tens of seconds to
+  # become Ready. Removing the old pod first would drop the Service for that
+  # whole window on a single-replica deployment; surging keeps the old one
+  # serving until the new one passes its startupProbe.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        {{- include "petclinic-service.labels" . | nindent 8 }}
+
+      annotations:
+        {{- if .Values.configMap.enabled }}
+        # Restarts the pods when the ConfigMap content changes. Without it, a
+        # config edit updates the ConfigMap and nothing else — the running pods
+        # keep the environment they started with, so the change looks like it
+        # was ignored.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+    spec:
+      serviceAccountName: {{ include "petclinic-service.serviceAccountName" . }}
+
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      {{- with .Values.topologySpreadConstraints }}
+      # Balances the eight services across nodes. The selector matches every
+      # petclinic pod in the namespace, not this Deployment's own pods — see the
+      # note in values.yaml for why that is what makes it do anything at one
+      # replica per service.
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.initContainers }}
+      # Startup order enforcement. The `docker` profile's config import is
+      # `configserver:http://config-server:8888` with no `optional:` prefix (see
+      # spring-petclinic-*/src/main/resources/application.yml in the application
+      # repo), so a service that starts before the Config Server does not
+      # degrade — it fails to start. On a cold cluster that is a CrashLoopBackOff
+      # race these loops exist to lose slowly instead.
+      initContainers:
+        {{- range . }}
+        - name: {{ .name }}
+          image: {{ .image | quote }}
+          imagePullPolicy: {{ .imagePullPolicy | default $.Values.image.pullPolicy }}
+          command:
+            {{- toYaml .command | nindent 12 }}
+          resources:
+            {{- toYaml $.Values.initContainerResources | nindent 12 }}
+          # The same context as the app container: busybox wget needs no
+          # capability, and the pod-level runAsUser/runAsNonRoot applies here too.
+          securityContext:
+            {{- toYaml $.Values.containerSecurityContext | nindent 12 }}
+        {{- end }}
+      {{- end }}
+
+      containers:
+        - name: {{ include "petclinic-service.fullname" . }}
+          image: {{ include "petclinic-service.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          ports:
+            - name: {{ .Values.service.portName }}
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: {{ .Values.springProfiles | quote }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- range .Values.secrets }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .key }}
+            {{- end }}
+
+          {{- if .Values.configMap.enabled }}
+          # Every key of the ConfigMap becomes an environment variable. These
+          # are the non-secret values — URLs, the JDBC endpoint, the Config
+          # Server's git repo — so nothing here needs a Secret.
+          envFrom:
+            - configMapRef:
+                name: {{ include "petclinic-service.fullname" . }}
+          {{- end }}
+
+          {{- with .Values.probes.startup }}
+          {{- if .enabled }}
+          # Runs first and gates the other two. failureThreshold 30 x period 10s
+          # gives a JVM up to five minutes to finish booting; until it succeeds
+          # neither the readiness nor the liveness probe runs, so a slow start
+          # cannot be mistaken for a hung process.
+          startupProbe:
+            httpGet:
+              path: {{ .path }}
+              port: {{ $.Values.service.portName }}
+            initialDelaySeconds: {{ .initialDelaySeconds }}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: {{ .timeoutSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+
+          {{- with .Values.probes.readiness }}
+          {{- if .enabled }}
+          # Gates Service endpoints: a pod that fails this is removed from the
+          # Service but left running, which is what makes a rolling update safe.
+          readinessProbe:
+            httpGet:
+              path: {{ .path }}
+              port: {{ $.Values.service.portName }}
+            initialDelaySeconds: {{ .initialDelaySeconds }}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: {{ .timeoutSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+
+          {{- with .Values.probes.liveness }}
+          {{- if .enabled }}
+          # Restarts the container. Deliberately slower than readiness — a
+          # transient slow response should take a pod out of rotation, not
+          # restart it.
+          livenessProbe:
+            httpGet:
+              path: {{ .path }}
+              port: {{ $.Values.service.portName }}
+            initialDelaySeconds: {{ .initialDelaySeconds }}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: {{ .timeoutSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}

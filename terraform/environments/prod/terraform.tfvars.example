@@ -1,0 +1,31 @@
+# Template for prod variable values (PETPLAT-1)
+#
+# Copy to terraform.tfvars before running Terraform:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# terraform.tfvars is gitignored (*.tfvars) — never commit real values.
+
+aws_region  = "eu-central-1"
+environment = "prod"
+project     = "petclinic"
+
+# OpenAI API key for genai-service. Terraform writes it to Secrets Manager at
+# petclinic/prod/openai-api-key; the ExternalSecret in
+# k8s/base/external-secrets/openai-api-key.yaml reads it from there into the
+# genai-service pod, so the value never enters Git or a manifest.
+#
+# Required — the variable has no default, and the plan fails if it is missing.
+# That is deliberate: an empty default would apply cleanly and only surface
+# later as an authentication error from genai-service. Prefer the environment
+# variable in CI, where nothing is written to disk:
+#
+#   export TF_VAR_openai_api_key="sk-..."
+#
+# The variable is ephemeral, so the value is written to neither terraform.tfstate
+# nor plan.out — setting it here does not put it in those files.
+#
+# To change the key later, bump openai_api_key_version in main.tf as well. The
+# write-only argument is never read back, so Terraform sees no difference from
+# editing this value alone and would leave the old key in Secrets Manager.
+#
+# openai_api_key = "sk-..."

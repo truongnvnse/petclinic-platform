@@ -1,0 +1,110 @@
+# prod.yaml — per-environment overrides for the prod environment (PETPLAT-46)
+#
+# Merged as: helm/petclinic-service/values.yaml → helm-values/{service}.yaml → this file
+#
+# Nothing here is deployed yet. terraform/environments/prod/ has not been applied
+# — there is no petclinic-prod ECR repository, no prod RDS instance, and no
+# petclinic-prod namespace — so this file is the *specification* of the prod
+# overlay rather than a description of a running one. The one value below that
+# cannot be known until prod is applied is marked as such.
+
+image:
+  registry: 550798137608.dkr.ecr.eu-central-1.amazonaws.com/petclinic-prod
+
+# replicaCount, autoscaling and podDisruptionBudget are all deliberately ABSENT
+# from this file.
+#
+# replicaCount is absent for the same structural reason as the other two, and it
+# is worth spelling out because the obvious alternative does not work. Setting
+# `replicaCount: 2` here looks right — six of the eight services want 2 in prod
+# — but this is the LAST merge layer, so it would beat every per-service value,
+# including the `replicaCount: 1` that admin-server needs. There is no way to
+# write "2 for these seven, 1 for that one" from a single shared file: Helm
+# merges values, it does not evaluate conditions.
+#
+# So the number lives with the service, and this file is silent. What that
+# produces, against the spec's prod overlay table (docs/technical-spec.md →
+# "Prod Overlay"):
+#
+#   config-server      2   helm-values/config-server.yaml
+#   discovery-server   2   helm-values/discovery-server.yaml
+#   admin-server       1   helm-values/admin-server.yaml (also the chart default)
+#   api-gateway        2   HPA floor — Deployment omits `replicas` entirely
+#   customers-service  2   HPA floor
+#   visits-service     2   HPA floor
+#   vets-service       2   HPA floor
+#   genai-service      1   HPA floor — the one the table pins at 1
+#
+# Note which services need an explicit number and which do not: only the three
+# with no HPA. Wherever an HPA exists the Deployment omits `replicas` so the
+# autoscaler owns the field, and a replicaCount set alongside it would be dead
+# weight — which is why customers-service.yaml and friends carry no replica
+# count at all, and their `replicaCount: 1` in dev.yaml is what applies when
+# dev.yaml turns their HPA off.
+#
+# dev.yaml still sets `replicaCount: 1` for everything, and that does work from
+# one shared file, because "1" needs no exceptions.
+
+# autoscaling and podDisruptionBudget are deliberately ABSENT from this file.
+#
+# They are the one place the layering inverts: everywhere else the environment
+# decides and the service inherits, but HPA and PDB are properties of what a
+# service is — a registry that never scales, a dashboard nobody depends on, a
+# gateway that takes every request — so they are set per service in
+# helm-values/{service}.yaml, and dev.yaml overrides all of them to off.
+#
+# Setting `autoscaling.enabled: true` here instead would look harmless and is
+# not: this is the last merge layer, so it would beat the `false` in
+# config-server.yaml, discovery-server.yaml and admin-server.yaml, and all three
+# would ship an HPA the spec's HPA table does not give them. (It is a one-line
+# mistake that produces six extra resources and no error — the rendered output
+# is valid, just wrong. `scripts/validate-helm.sh` will not catch it either;
+# count the resources in a prod render.)
+#
+# This is also a deliberate departure from one line of the spec: the summary at
+# docs/technical-spec.md → "Helm Values Structure" describes prod.yaml as
+# "replicas=2, HPA enabled, PDB enabled". Taken literally that is the mistake
+# above — it would give config-server, discovery-server and admin-server an HPA,
+# and genai-service and admin-server a PDB, none of which the spec's own HPA and
+# PDB tables list. The tables are the specific statement and the summary line is
+# not, so the tables win.
+#
+# The HPA still needs Metrics Server, which is PETPLAT-72 and not yet installed
+# on any cluster. Until it is, prod's HPAs will report <unknown> exactly as
+# dev's would — and note what that means on a FIRST prod install: an HPA-backed
+# Deployment that omits `replicas` is created at the Kubernetes default of 1,
+# not at its minReplicas, and never scales up. Four of those services carry a
+# PDB with minAvailable: 1, which then blocks a node drain. Installing Metrics
+# Server is a prerequisite of the prod rollout, not a follow-up to it.
+
+database:
+  # NOT A REAL ENDPOINT. prod has never been applied, so its RDS hostname does
+  # not exist yet, and the identifier segment is generated — it cannot be
+  # predicted from dev's. Replace this with
+  #
+  #   terraform -chdir=terraform/environments/prod output -raw rds_connection_string
+  #
+  # before the first prod deploy. The host is deliberately unresolvable rather
+  # than plausible: a placeholder that looked like a real RDS hostname could
+  # survive review, whereas this one fails at pod start with an
+  # UnknownHostException naming the string below.
+  connectionString: jdbc:mysql://REPLACE-ME-prod-rds-endpoint.eu-central-1.rds.amazonaws.com:3306/petclinic
+
+# ---
+# Known gaps before prod can be deployed, none of them fixable from this file:
+#
+# 1. database.connectionString — see above.
+# 2. Both ExternalSecrets in k8s/base/external-secrets/ hardcode
+#    `namespace: petclinic-dev`. Installing this release set into petclinic-prod
+#    would leave SPRING_DATASOURCE_PASSWORD and OPENAI_API_KEY pointing at
+#    Secrets that do not exist there, and the pods would fail with
+#    CreateContainerConfigError rather than a configuration error. prod needs its
+#    own ExternalSecret CRs (and the Secrets Manager entries they read).
+# 3. The petclinic-prod namespace exists as of 2026-10-11 (k8s/base/namespaces.yaml
+#    declares both environments and was applied whole), so this gap is closed —
+#    but nothing else in the prod column is, and an empty namespace is not a
+#    deployable environment.
+# 4. There is no petclinic-prod Ingress. k8s/base/ingress/ingress.yaml is
+#    dev-only (namespace petclinic-dev, and an Ingress must share its
+#    namespace with the Service it targets), and its header says so. prod needs
+#    its own copy with prod's certificate and host.

@@ -1,0 +1,62 @@
+# openai-api-key.yaml — sync the OpenAI API key into the cluster (PETPLAT-36)
+#
+# Reads petclinic/dev/openai-api-key out of AWS Secrets Manager and writes a
+# Kubernetes Secret named openai-api-key in petclinic-dev, with a single key:
+# OPENAI_API_KEY. genai-service consumes it as an environment variable through
+# its Helm values.
+#
+# Values from docs/technical-spec.md → "Secrets Management" →
+# "ExternalSecret Manifests" → OpenAI API Key:
+#   refreshInterval 1h, target.name openai-api-key, key OPENAI_API_KEY.
+#
+# ---------------------------------------------------------------------------
+# No remoteRef.property — the remote secret is plaintext, not JSON
+#
+# This is the one structural difference from rds-credentials.yaml, and it
+# follows the remote secret's shape rather than a preference. The rds secret is
+# a JSON object because it carries two values that belong together; this one
+# carries a single string, so the secrets module (PETPLAT-33) stores it as
+# plaintext and there is no field to select.
+#
+# Adding a property here would fail at sync time: ESO would try to parse the
+# value as JSON and report that the key does not exist. Conversely, dropping the
+# property from the rds manifest would not fail at all — it would silently copy
+# the JSON blob into both keys, which is the more dangerous of the two mistakes.
+#
+# ---------------------------------------------------------------------------
+# Namespace
+#
+# Dev-specific, for the same reasons as rds-credentials.yaml: the Secret is
+# written into the namespace of the ExternalSecret, and the remote secret name
+# carries the environment. Prod needs its own copy in petclinic-prod pointing at
+# petclinic/prod/openai-api-key. A copy in the wrong namespace would not fail —
+# it would put the dev key into prod and the prod service would authenticate
+# successfully against the dev account's quota.
+
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+
+metadata:
+  name: openai-api-key
+  namespace: petclinic-dev
+
+  labels:
+    app.kubernetes.io/name: openai-api-key
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: infrastructure
+
+spec:
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+
+  refreshInterval: 1h
+
+  target:
+    name: openai-api-key
+
+  data:
+    - secretKey: OPENAI_API_KEY
+      remoteRef:
+        key: petclinic/dev/openai-api-key

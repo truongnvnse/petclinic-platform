@@ -1,0 +1,244 @@
+# update-image-tags.yml — the second half of the CI pipeline (PETPLAT-50, PETPLAT-87)
+#
+# The app repo's build-push workflow builds and pushes images to ECR, then fires
+# a repository_dispatch event here. This workflow writes the new tag into
+# helm-values/ and pushes a commit. ArgoCD watches this repository, so that
+# commit IS the deployment trigger — which is why there is no `kubectl` and no
+# `aws eks update-kubeconfig` anywhere in this file. CI pushes images and commits
+# a tag; ArgoCD does the deploying. CLAUDE.md states this as a hard rule, and
+# PETPLAT-50 lists both commands as things this workflow must not contain.
+#
+# Why repository_dispatch rather than workflow_run: workflow_run only fires for
+# workflows in the SAME repository. The build runs in the app repo and this file
+# lives in the platform repo, so there is no workflow_run relationship to key
+# off. The dispatch event is the only mechanism that crosses that boundary.
+
+name: Update Image Tags
+
+on:
+  repository_dispatch:
+    types: [app-image-built]
+
+# The commit this workflow pushes is the deployment signal, so the job needs to
+# write to the repo. Everything else stays at the default of none.
+permissions:
+  contents: write
+
+# Two dispatches arriving close together would race on the same eight files, and
+# the loser would fail to fast-forward. Queued rather than cancelled: both SHAs
+# are real builds, and dropping the earlier one would leave the values files
+# pointing at an older image than the newest successful build.
+concurrency:
+  group: update-image-tags
+  cancel-in-progress: false
+
+env:
+  # The eight services, in the order the ECR module creates them. Fixed here
+  # rather than read from the payload so a truncated or malformed payload cannot
+  # leave the values files half-updated — the loop either rewrites all eight or
+  # fails before the commit.
+  #
+  # This writes all eight files, and build-push.yml no longer pushes all eight
+  # images. That mismatch is now confirmed rather than suspected, so read this
+  # before the first real dispatch.
+  #
+  # The build detects changed service directories with dorny/paths-filter and
+  # builds ONLY those — so its dispatch payload names a subset. This workflow
+  # ignores the payload for deciding what to write (see the warning step below,
+  # which reports the divergence on every run) and stamps the same SHA into all
+  # eight files. For any service that was not built, that SHA is not in ECR, and
+  # the pods go to ImagePullBackOff. docs/rollback-runbook.md → "Rollback: a tag
+  # that is not in ECR" is the recovery.
+  #
+  # The all-eight behaviour is a deliberate choice, made with the tradeoff
+  # stated: PETPLAT-50's acceptance criteria, docs/technical-spec.md → "Update
+  # Image Tags Steps" step 2, the spec's own code sketch and PETPLAT-49's
+  # acceptance criteria all say to write only the services in the payload. This
+  # workflow does the opposite on purpose. Changing it is a one-line edit —
+  # iterate ${SERVICES_IN_PAYLOAD} instead of ${SERVICES} below — but it is a
+  # decision, not a cleanup, so it is not made silently here.
+  SERVICES: >-
+    config-server discovery-server api-gateway customers-service
+    visits-service vets-service genai-service admin-server
+
+  # Version and hash are pinned together — bump both in the same commit. The
+  # hash is the release's published sha256 for yq_linux_amd64, checked before
+  # install rather than after, because this binary runs with the job's token in
+  # its environment.
+  #
+  # The mikefarah/yq GitHub Action is deliberately not used: it is a Docker
+  # action whose `cmd` input is required, so it runs one yq invocation inside a
+  # container and never puts yq on the runner's PATH for the shell loop below.
+  YQ_VERSION: v4.54.1
+  YQ_SHA256: 8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
+
+jobs:
+  # Named per .claude/rules/pipelines.md → "Job Naming".
+  update-tags:
+    name: Update image tags
+    runs-on: ubuntu-latest
+
+    # Without this a hung run holds the concurrency group until GitHub's 6-hour
+    # ceiling, queueing every later dispatch behind it — and the group is
+    # deliberately non-cancelling, so nothing clears it early.
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout platform repo
+        # Pinned to the v4.2.2 commit, not the mutable `v4` tag. This action
+        # runs with a token that can write to the repository, and a tag can be
+        # repointed at different code without any change here.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # The default GITHUB_TOKEN, which is enough to push to this repo given
+          # `permissions: contents: write` above. Note that a push made with it
+          # deliberately does not trigger further workflow runs — harmless here,
+          # because ArgoCD watches the repository itself rather than Actions
+          # events, so it sees the commit either way.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install yq
+        run: |
+          set -euo pipefail
+
+          # mktemp rather than a fixed /tmp/yq: a predictable path in a shared
+          # /tmp is a symlink target for anything else running on the runner.
+          workdir=$(mktemp -d)
+          curl -fsSL --retry 3 --retry-delay 2 -o "${workdir}/yq" \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+
+          if ! echo "${YQ_SHA256}  ${workdir}/yq" | sha256sum --check --status; then
+            echo "::error::yq ${YQ_VERSION} failed its checksum — the download is not the pinned release"
+            exit 1
+          fi
+
+          sudo install -m 0755 "${workdir}/yq" /usr/local/bin/yq
+          yq --version
+
+      - name: Update image tags
+        env:
+          # Passed through env rather than interpolated into the script below.
+          # `${{ }}` inside a run: block is textual substitution performed
+          # before the shell ever sees the script, so a payload containing shell
+          # metacharacters would execute. Through env it stays data.
+          SHA: ${{ github.event.client_payload.sha }}
+          # Also from the payload. Used ONLY to check the assumption described
+          # above — never to decide which files are written.
+          SERVICES_IN_PAYLOAD: ${{ github.event.client_payload.services }}
+        run: |
+          set -euo pipefail
+
+          # The payload is attacker-influenced: anyone holding the token that
+          # dispatches can put anything in `sha`, and that value lands in a yq
+          # expression, a commit message and this log. Checking its shape first
+          # is what keeps it data rather than code.
+          if [[ ! "${SHA}" =~ ^[0-9a-f]{7,40}$ ]]; then
+            # The offending value is deliberately NOT echoed. This branch runs
+            # precisely because the value is not a hex SHA, and the runner parses
+            # `::error::` and `::warning::` out of stdout — so a payload carrying
+            # a newline and a workflow command would be interpreted rather than
+            # printed. Length and character class are enough to debug with.
+            echo "::error::client_payload.sha must be 7-40 lowercase hex characters (got ${#SHA} characters; value withheld)"
+            exit 1
+          fi
+
+          # The all-eight design above assumes build-push pushed all eight
+          # images at this SHA. It does not: it builds only the services whose
+          # directories changed. So a subset payload is the NORMAL case here,
+          # not an anomaly, and this warning is expected to fire on almost every
+          # dispatch — it is not a sign that something has gone wrong, it is the
+          # known divergence between the two workflows being reported.
+          #
+          # This does not change what gets written. It makes the mismatch
+          # visible in the run summary instead of only in the pods, which is the
+          # difference between a five-minute diagnosis and an hour of one.
+          if [[ -n "${SERVICES_IN_PAYLOAD// /}" ]]; then
+            payload_sorted=$(echo ${SERVICES_IN_PAYLOAD} | tr ' ' '\n' | sort | tr '\n' ' ')
+            all_sorted=$(echo ${SERVICES} | tr ' ' '\n' | sort | tr '\n' ' ')
+            if [[ "${payload_sorted}" != "${all_sorted}" ]]; then
+              echo "::warning::client_payload.services names a subset (${SERVICES_IN_PAYLOAD}), but this workflow writes the tag to all eight values files. The build pushed only that subset, so the other services now name a tag that is not in ECR — they will keep running on their existing pods until those pods are replaced, and then go to ImagePullBackOff. This is the expected consequence of the all-eight design; see the comment on SERVICES above and docs/rollback-runbook.md."
+            fi
+          fi
+
+          # One yq invocation per file, and the loop is load-bearing rather than
+          # stylistic. `yq -i '.image.tag = strenv(SHA)' helm-values/*.yaml` does
+          # NOT edit each file in place: yq reads all of them as a single document
+          # stream and writes the concatenated result to the first file, leaving
+          # the others untouched. Measured with v4.54.1 — admin-server.yaml ended
+          # up holding ten documents and the other nine kept the old tag. Do not
+          # collapse this loop.
+          for service in ${SERVICES}; do
+            file="helm-values/${service}.yaml"
+
+            if [[ ! -f "${file}" ]]; then
+              echo "::error::${file} does not exist — the service list above and helm-values/ have drifted apart"
+              exit 1
+            fi
+
+            # yq round-trips the whole document rather than editing a line, and
+            # it does NOT round-trip whitespace faithfully. Measured against
+            # these files with yq v4.54.1:
+            #
+            #   preserved  comments, key order, quoting, indentation
+            #   collapsed  blank lines — 12 of them become 1 in config-server.yaml
+            #
+            # So the FIRST run after this workflow is added rewrites all eight
+            # files and the diff is mostly deleted blank lines. That noise is
+            # one-time and self-correcting: yq's output is stable under a second
+            # pass, so from then on a repeat dispatch with the same SHA changes
+            # nothing, and a new SHA changes exactly one line per file. Worth
+            # knowing when reviewing the first CI commit — the tag change is one
+            # line of it, not the hundred.
+            #
+            # If the blank lines are wanted back, the fix is to commit yq's
+            # output once rather than to add formatting repair to this job.
+            #
+            # strenv() rather than interpolating ${SHA} into the expression, so
+            # the value stays a value: the safety of this line no longer rests on
+            # the regex above having been written correctly. The regex is still
+            # what makes the *commit message* and the rest of this script safe.
+            yq -i '.image.tag = strenv(SHA)' "${file}"
+          done
+
+          echo "SHA=${SHA}" >> "${GITHUB_ENV}"
+
+          echo "=== resulting diff ==="
+          git --no-pager diff -- helm-values/
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- helm-values/; then
+            echo "No tag changes: every file already carries ${SHA}. Nothing to commit."
+            exit 0
+          fi
+
+          # PETPLAT-50 fixes this format: "ci: update image tags to {sha} ({service-list})"
+          service_list=$(echo ${SERVICES} | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+
+          # -u, not -A: stage modifications to the eight tracked values files and
+          # nothing else. A new file appearing under helm-values/ is a change to
+          # the service list, which is a human decision, not something this job
+          # should commit on its own.
+          git add -u helm-values/
+          git commit -m "ci: update image tags to ${SHA} (${service_list})"
+
+          # ArgoCD sees this commit and syncs — dev automatically, prod after a
+          # manual approval in the ArgoCD UI. Nothing else is needed to deploy.
+          git push
+
+      # .claude/rules/pipelines.md → "On failure: do NOT retry automatically,
+      # notify team". There is no chat or paging integration wired up yet, so the
+      # notification is an annotation on the failed run. It is worth having even
+      # so, because of what it says: the app repo's build has already gone green
+      # by the time this workflow runs, so nothing upstream will report this
+      # failure. A red run here means the pipeline stopped silently at the last
+      # step and the cluster is still on the previous tag.
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "::error::update-image-tags failed. The application build has already succeeded, so no other system will flag this: helm-values/ is unchanged and nothing was deployed. Re-dispatch the event from the app repo once the cause is fixed — do not retry the build, which is green. See docs/ci-operations.md."

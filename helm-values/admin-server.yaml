@@ -1,0 +1,86 @@
+# admin-server.yaml — Spring Boot Admin (PETPLAT-44)
+#
+# Merged as: helm/petclinic-service/values.yaml → this file → helm-values/{env}.yaml
+#
+# The dashboard, not part of the request path. It discovers the other seven
+# through Eureka and polls their actuator endpoints, so it is a *consumer* of
+# the platform rather than a dependency of it — which is why it is the one
+# service with neither an HPA nor a PDB.
+
+fullnameOverride: admin-server
+
+# `admin` is the spec's fourth component value, and this is the only service it
+# applies to.
+component: admin
+
+# One replica in every environment. This is also the chart default, and is
+# written out anyway because the spec's prod overlay table pins this service at
+# 1 ("Monitoring tool, single replica sufficient") and a reader looking for that
+# decision should find it here rather than have to reason from an absence.
+#
+# The reason it belongs to the service and not the environment is the same
+# reason it has no HPA and no PDB: Spring Boot Admin keeps its view of the
+# platform in memory. Two replicas are not two copies of one dashboard — they
+# are two independent dashboards that discover and poll the other services
+# separately, and whichever one you reach shows a different subset of the
+# registry depending on which pods it happened to notice. Redundancy for a
+# monitoring tool that would report inconsistently is not redundancy.
+#
+# (helm-values/prod.yaml does not set replicaCount, so this value is not being
+# overridden by the env layer — the merge order runs chart → service → env, and
+# a value in an env file would win over this one.)
+replicaCount: 1
+
+image:
+  name: admin-server
+  tag: "v1.0.0"
+
+service:
+  port: 9090
+
+# No `production`: unlike vets-service and genai-service, this module's
+# application.yml declares no spring.profiles.active at all, so `docker` is
+# purely additive. Its config repo file (admin-server.yml) sets
+# `server.port: 9090` at the TOP level — not inside a profile block — so the
+# port is right either way; `docker` is what adds the eureka defaultZone.
+springProfiles: docker
+
+initContainers:
+  - name: wait-for-config-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://config-server:8888/actuator/health; do sleep 5; done']
+
+  # Strictly speaking this one is about what the dashboard can SHOW rather than
+  # whether it starts: Spring Boot Admin registers itself with Eureka and then
+  # lists whatever else is registered. Starting before Eureka is serving leaves
+  # it up but with an empty application list, and it fills in on its next
+  # registry refresh.
+  - name: wait-for-discovery-server
+    image: busybox:1.36
+    command: ['sh', '-c', 'until wget -qO- http://discovery-server:8761/actuator/health; do sleep 5; done']
+
+configMap:
+  data:
+    # Consumed by the default profile's import
+    # (`optional:configserver:${CONFIG_SERVER_URL:http://localhost:8888/}`);
+    # under `docker` the URL is hardcoded to the same host.
+    CONFIG_SERVER_URL: http://config-server:8888
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# No HPA. The spec's HPA table covers five services and this is not one of them.
+# Its load is one person looking at a dashboard, and its CPU floor is a JVM
+# idling — scaling it on CPU would mean it never scales and never should.
+autoscaling:
+  enabled: false
+
+# No PDB. Evicting the dashboard loses nothing: it holds no state and nothing
+# routes to it.
+podDisruptionBudget:
+  enabled: false

@@ -84,7 +84,7 @@ Create `.mcp.json` at the project root with all MCP servers needed for the infra
 
 **Acceptance Criteria:**
 - [ ] `.mcp.json` at petclinic-platform root
-- [ ] Terraform MCP server configured (`awslabs.terraform-mcp-server`)
+- [ ] Terraform MCP server configured (`terraform` — hashicorp/terraform-mcp-server via Docker)
 - [ ] AWS Knowledge MCP configured (`aws-knowledge-mcp`)
 - [ ] AWS Pricing MCP configured (`awslabs.aws-pricing-mcp-server`, region: eu-central-1)
 - [ ] Context7 MCP configured (library documentation)
@@ -355,7 +355,7 @@ Create a reusable VPC module in `terraform/modules/vpc/` that provisions:
 - [ ] No NAT Gateway (intentional — cost saving for students)
 - [ ] Subnets tagged for EKS: `kubernetes.io/cluster/petclinic-{env}` = shared, `kubernetes.io/role/elb` = 1
 - [ ] All resources tagged with Project, Environment, ManagedBy
-- [ ] Outputs: vpc_id, subnet_ids
+- [ ] Outputs: vpc_id, public_subnet_ids (see [Terraform Modules](./technical-spec.md#terraform-modules) → Module: `vpc`)
 - [ ] `terraform validate` passes
 
 ---
@@ -579,6 +579,9 @@ Call the EKS module from dev environment with dev-appropriate sizing.
 - [ ] EKS module called in dev main.tf
 - [ ] Cluster name: petclinic-dev
 - [ ] Node group: t4g.small (ARM/Graviton free trial), min=2, max=4, desired=2
+      → **dev runs `t4g.medium` as of 2026-10-11.** t4g.small caps at 11 pods per
+        node and reports 1365 MiB allocatable, which cannot hold eight services
+        alongside the system pods. See docs/technical-spec.md → "Managed Node Group".
 - [ ] VPC and subnet IDs passed from VPC module outputs
 - [ ] Security group IDs passed
 - [ ] `terraform plan` shows expected resources
@@ -1071,7 +1074,7 @@ Install External Secrets Operator (ESO) on the EKS cluster. ESO will sync secret
 **Technical Spec:** [Secrets Management](./technical-spec.md#secrets-management), [IRSA Roles](./technical-spec.md#irsa-roles)
 
 **Acceptance Criteria:**
-- [ ] ESO installed via kubectl apply (CRDs + controller)
+- [ ] ESO installed from the pinned upstream release (v2.12.0) by `scripts/install-eso.sh`, applied with `kubectl apply --server-side` — the two SecretStore CRDs are ~720 KB each, over the 262,144-byte client-side-apply annotation cap
 - [ ] ESO pods running in `external-secrets` namespace
 - [ ] IAM role for service account (IRSA) created with Secrets Manager read permissions (`secretsmanager:GetSecretValue`, `secretsmanager:DescribeSecret`)
 - [ ] SecretStore or ClusterSecretStore resource created with `provider: aws` and `service: SecretsManager`
@@ -1143,7 +1146,7 @@ Create an IAM role with a trust policy for the ESO service account (IRSA) with p
 
 **Acceptance Criteria:**
 - [ ] IAM role created with OIDC trust policy for the ESO service account
-- [ ] Policy: `secretsmanager:GetSecretValue`, `secretsmanager:DescribeSecret` on `arn:aws:secretsmanager:*:*:secret:petclinic/*`
+- [ ] Policy: `secretsmanager:GetSecretValue`, `secretsmanager:DescribeSecret` on `arn:aws:secretsmanager:eu-central-1:{account}:secret:petclinic/{env}/*` (environment-scoped, not `petclinic/*` — both environments share one AWS account, so the broader pattern would let the dev cluster's operator read prod's database password and OpenAI key)
 - [ ] Policy: `kms:Decrypt` for encrypted secrets (if using custom KMS key)
 - [ ] Role ARN output for use in ESO ServiceAccount annotation
 - [ ] `terraform validate` passes

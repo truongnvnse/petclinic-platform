@@ -22,9 +22,8 @@ Run a Checkov security scan on Terraform code and categorize findings.
 
 2. Verify the target directory exists and contains .tf files.
 
-3. Run Checkov scan using the MCP tool (preferred) or CLI:
-   - MCP: Use `RunCheckovScan` with the target directory
-   - CLI fallback: `checkov -d {target} --framework terraform --output json`
+3. Run the Checkov scan:
+   `uvx checkov -d {target} --framework terraform --output json`
 
 4. Categorize findings into severity levels:
    - **Critical**: Public access, missing encryption, wildcard IAM

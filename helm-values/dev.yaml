@@ -1,0 +1,78 @@
+# dev.yaml — per-environment overrides for the dev environment (PETPLAT-45)
+#
+# Merged as: helm/petclinic-service/values.yaml → helm-values/{service}.yaml → this file
+#
+# This is the LAST layer, so anything here beats both the chart defaults and the
+# service file. The division of labour is deliberate: a service file knows what
+# the service is (port, image name, profiles, init containers) and this file
+# knows where it runs (registry, replica count, database). Neither has to know
+# both.
+#
+# Only values that differ between dev and prod belong here. A value that is the
+# same in both is a chart default.
+
+image:
+  # The whole registry path, not just the account: dev and prod are separate ECR
+  # repositories under the same account, so the repository name is part of the
+  # environment, not part of the service. `image.name` in the service file is
+  # the image name alone, and the two concatenate into
+  # 550798137608.dkr.ecr.eu-central-1.amazonaws.com/petclinic-dev/api-gateway:v1.0.0
+  #
+  # The account ID here must match `terraform output -raw ecr_registry`. It is
+  # written out rather than interpolated because Helm has no way to call
+  # terraform, and because a wrong account ID fails as an image-pull error that
+  # names the account — which is a legible failure.
+  registry: 550798137608.dkr.ecr.eu-central-1.amazonaws.com/petclinic-dev
+
+# One replica of everything. Node capacity is the constraint on this environment,
+# but note which capacity it is: the 128Mi request is a scheduling hint, not a
+# usage figure, and the scheduler will pack four JVMs onto a node that cannot
+# keep them resident — which is what lost a t4g.small node on 2026-10-11. Dev now
+# runs t4g.medium (17 pods per node, 4096 MiB), so the eight services fit with
+# real headroom. See docs/technical-spec.md → "Managed Node Group".
+replicaCount: 1
+
+# HPA and PDB are off across the board in dev, which is why the spec's per-service
+# HPA/PDB tables read as prod settings.
+#
+# The HPA would also be useless here: Metrics Server is not installed on this
+# cluster yet (PETPLAT-72 owns it, and it is not in terraform/modules/eks/'s
+# addon list). With no metrics API the HPA reports <unknown> and never scales —
+# see the note in helm/petclinic-service/templates/NOTES.txt.
+autoscaling:
+  enabled: false
+
+# A PDB with one replica is worse than no PDB: `minAvailable: 1` on a
+# single-replica Deployment blocks every node drain, so a routine cluster
+# upgrade would hang waiting for a pod that cannot be evicted.
+podDisruptionBudget:
+  enabled: false
+
+database:
+  # From `terraform output -raw rds_connection_string` in
+  # terraform/environments/dev/. Re-read it after any rebuild — the RDS hostname
+  # contains a generated identifier that changes whenever the instance is
+  # recreated, so a stale value here fails as an UnknownHostException at pod
+  # start, not as a wrong-database write.
+  #
+  # No `allowPublicKeyRetrieval` and no `useSSL`. The connector needs
+  # allowPublicKeyRetrieval only when the server asks for a caching_sha2_password
+  # handshake over an unencrypted connection, and this server does not:
+  # `aws rds describe-db-parameters --db-parameter-group-name
+  # petclinic-dev-mysql8` reports default_authentication_plugin =
+  # mysql_native_password with Source = engine-default.
+  #
+  # That Source is the part worth keeping in mind. It is RDS MySQL 8.0's own
+  # default, not something this repository configured —
+  # terraform/modules/rds/main.tf sets only character_set_server and
+  # collation_server on that group. So the parameter is not pinned by anything
+  # here, and a future engine-version upgrade that changed the default would
+  # change this behaviour without changing any file in this repo. If the
+  # datasource ever starts failing with "Public Key Retrieval is not allowed",
+  # that is what happened; the fix is to add allowPublicKeyRetrieval=true here
+  # (or pin the parameter), not to go looking for a change in this file.
+  #
+  # TLS is off for the same reason it is off everywhere in this platform: the
+  # traffic never leaves the VPC. RDS sits in the same VPC as the nodes and the
+  # RDS security group admits only the node security group.
+  connectionString: jdbc:mysql://petclinic-dev-mysql.cdc06082m3dg.eu-central-1.rds.amazonaws.com:3306/petclinic

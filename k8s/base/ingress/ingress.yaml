@@ -1,0 +1,156 @@
+# ingress.yaml — external entry point for the API Gateway (PETPLAT-30)
+#
+# The AWS Load Balancer Controller watches this resource and provisions an
+# internet-facing ALB, an HTTPS listener on the ACM certificate, and a target
+# group pointing at the api-gateway pods. Nothing else in the platform is
+# exposed: the ALB routes every path to the API Gateway, which fans out to the
+# backend services over Spring Cloud Gateway routing.
+#
+# Values from docs/technical-spec.md → "DNS and Ingress":
+#   * scheme internet-facing, target-type ip
+#   * HTTP 80 + HTTPS 443 listeners, HTTP redirected to 443
+#   * certificate *.gannet.click from the ACM certificate Terraform created
+#   * health check /actuator/health on port 8080
+#   * "/" → api-gateway:8080
+#
+# ---------------------------------------------------------------------------
+# The two Terraform-owned values below are already substituted, and this note is
+# how to regenerate them rather than a step still to do. Both were created by
+# Terraform and so could not be written here at authoring time:
+#
+# 1. ACM_CERTIFICATE_ARN — the validated wildcard certificate:
+#
+#      cd terraform/environments/dev
+#      terraform output -raw acm_certificate_arn
+#
+# 2. ALB_SECURITY_GROUP_ID — the ALB security group Terraform created:
+#
+#      cd terraform/environments/dev
+#      terraform output -raw alb_sg_id
+#
+# Re-read both after any change that recreates the certificate or the security
+# group — a full rebuild of dev will, since neither is imported.
+#
+# Note that applying this file with the placeholders still in place will NOT
+# fail. `<ACM_CERTIFICATE_ARN>` is a valid YAML scalar and metadata.annotations
+# is an unconstrained string map, so `kubectl apply` — and even a server-side
+# dry run — succeeds. The failure is asynchronous and shows up later as
+# reconcile errors on the Ingress (an invalid security group ID stops the ALB
+# being created; an invalid certificate ARN stops the HTTPS listener):
+#
+#   kubectl describe ingress api-gateway -n petclinic-dev
+#   kubectl logs -n kube-system deploy/aws-load-balancer-controller
+#
+# So the absence of an apply-time error is not evidence that the substitution
+# happened — check the two values are real before assuming the Ingress is fine.
+#
+# The security-groups annotation is what makes the platform's security group
+# design work. The node security group takes two rules sourced from the ALB
+# security group — 8080 for target-group health checks and 30000-32767 for
+# NodePort services (terraform/modules/vpc/main.tf), plus rules from the cluster
+# security group and from itself. Pinning the annotation to Terraform's ALB
+# security group puts the load balancer inside that perimeter: those rules name
+# a specific group, and this is what makes it the right one.
+#
+# Leaving the annotation off would not break connectivity — the controller would
+# create its own group and then add the matching rules to the node security
+# group itself ("the securityGroups for Node/Pod will be modified to allow
+# inbound traffic from this securityGroup", LBC annotations reference). The
+# application would still be reachable, which is exactly what makes this worth
+# stating plainly: the perimeter would have been edited by a controller at
+# runtime instead of by Terraform, and under ADR-0001 the security groups *are*
+# the perimeter. That same auto-management is why the controller's IAM policy
+# carries ec2:AuthorizeSecurityGroupIngress and ec2:RevokeSecurityGroupIngress
+# on "*" (terraform/modules/eks/main.tf) — permissions this annotation is what
+# leaves unused.
+#
+# Setting it also means the controller never creates or manages a group of its
+# own here, so the rules in terraform/modules/vpc/ are the complete set and a
+# security review of that file is a review of the whole perimeter.
+#
+# ---------------------------------------------------------------------------
+# Namespace
+#
+# api-gateway runs in petclinic-dev, and an Ingress must live in the same
+# namespace as the Service it targets, so this manifest is dev-specific.
+# Prod (petclinic.{domain}, its own certificate) needs its own copy in
+# petclinic-prod; it is not parameterised here because the base layer has no
+# templating yet — the Helm chart in helm/petclinic-service/ is where the
+# environment split lands.
+# ---------------------------------------------------------------------------
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-gateway
+  namespace: petclinic-dev
+
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: petclinic
+    # kubectl, not Helm: this file is applied by hand (or by
+    # scripts/install-lb-controller.sh), not rendered by the chart in
+    # helm/petclinic-service/. That chart has no ingress template — the Ingress
+    # is deliberately outside it, because there is one ALB for the whole
+    # namespace rather than one per service, so it does not belong in a
+    # per-service release. Every other raw manifest under k8s/base/ carries
+    # managed-by: kubectl for the same reason.
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: gateway
+
+  annotations:
+    # Authoritative ingress class selector. The chart creates an IngressClass
+    # named "alb" (createIngressClassResource defaults to true), and the
+    # controller's own ingressClass value is "alb", so this matches.
+    # The deprecated kubernetes.io/ingress.class annotation below is retained
+    # because docs/technical-spec.md lists it; the controller still honours it
+    # by default (disableIngressClassAnnotation defaults to false). If the
+    # controller is ever configured with disableIngressClassAnnotation: true,
+    # drop the annotation and keep ingressClassName.
+    kubernetes.io/ingress.class: alb
+
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # ip mode registers pod IPs in the target group rather than routing through
+    # NodePort. It avoids an extra hop and, more importantly, means the ALB
+    # health check reaches the pod directly — with instance mode a failing pod
+    # can still be hidden behind a healthy node.
+    alb.ingress.kubernetes.io/target-type: ip
+
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:eu-central-1:550798137608:certificate/6c2d7b3c-bc68-4fab-9543-ecca7f8224c9"
+    alb.ingress.kubernetes.io/security-groups: "sg-0cf2bebb632685fc3"
+
+    # Listen on both ports and redirect 80 to 443. The HTTP listener exists
+    # only to issue the redirect, so no request is ever served over plaintext.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health
+    alb.ingress.kubernetes.io/healthcheck-port: "8080"
+
+    # Health-check tuning is deliberately left at the controller's defaults
+    # (15s interval, 5s timeout, 2 healthy / 2 unhealthy, success code 200).
+    # The spec fixes the path and port but says nothing about thresholds, and
+    # stating the defaults here as if they were chosen would make a future
+    # change to them look deliberate. `/actuator/health` maps DOWN and
+    # OUT_OF_SERVICE to 503 and everything else — including UNKNOWN — to 200,
+    # which is what the ALB's default 200
+    # matcher already expects — no success-codes override is needed.
+
+spec:
+  ingressClassName: alb
+
+  rules:
+    # No host is pinned: the ALB answers on whatever name resolves to it, which
+    # lets the dev record (petclinic-dev.gannet.click) and the prod record
+    # (petclinic.gannet.click) be attached by DNS without editing this manifest.
+    # The certificate is a wildcard, so it covers either name.
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080

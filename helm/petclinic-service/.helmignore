@@ -1,0 +1,14 @@
+# .helmignore — files that must not be packaged into the chart archive
+#
+# `helm template` and `helm install` from a directory ignore this file entirely;
+# it only matters for `helm package`. Keeping it accurate anyway means a chart
+# pushed to a repository later carries the same content as the one in Git.
+
+.DS_Store
+.git/
+.gitignore
+.helmignore
+*.swp
+*.tmp
+*.orig
+*.rej

@@ -1,0 +1,370 @@
+<title>Petclinic VPC Topology</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  /* ---------------------------------------------------------------
+     Layout: single documentation column, wide figures break out
+     Colour: cool blue-grey neutrals; teal accent for SG-to-SG paths,
+     amber reserved for the one thing open to the internet.
+     Type:   Plex Sans for prose, Plex Mono for every config value.
+     --------------------------------------------------------------- */
+  :root {
+    --bg:        #f4f6f9;
+    --surface:   #ffffff;
+    --surface-2: #eef1f5;
+    --fg:        #14181f;
+    --muted:     #5a6472;
+    --border:    #d9dee6;
+    --accent:    #0d6d78;
+    --accent-sf: #e2f1f2;
+    --warn:      #9a5b06;
+    --warn-sf:   #fdf0dc;
+    --ok:        #2f6b3f;
+    --ok-sf:     #e6f2e9;
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0e1216;
+      --surface:   #161c22;
+      --surface-2: #1d242c;
+      --fg:        #e3e8ee;
+      --muted:     #8d97a5;
+      --border:    #29313a;
+      --accent:    #4cc9d4;
+      --accent-sf: #12333a;
+      --warn:      #e5a94a;
+      --warn-sf:   #33260f;
+      --ok:        #7cc48e;
+      --ok-sf:     #17301f;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0e1216;
+    --surface:   #161c22;
+    --surface-2: #1d242c;
+    --fg:        #e3e8ee;
+    --muted:     #8d97a5;
+    --border:    #29313a;
+    --accent:    #4cc9d4;
+    --accent-sf: #12333a;
+    --warn:      #e5a94a;
+    --warn-sf:   #33260f;
+    --ok:        #7cc48e;
+    --ok-sf:     #17301f;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    padding-inline: 20px;
+    padding-block: 40px 64px;
+  }
+  .wrap { max-width: 1000px; margin-inline: auto; display: flex; flex-direction: column; gap: 40px; }
+
+  header { display: flex; flex-direction: column; gap: 14px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  h1 { font-size: clamp(26px, 4vw, 34px); font-weight: 600; letter-spacing: -.02em; margin: 0; text-wrap: balance; }
+  .lede { margin: 0; color: var(--muted); max-width: 62ch; }
+
+  .toggle { display: inline-flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 3px; width: fit-content; }
+  .toggle button {
+    font-family: var(--mono); font-size: 13px; font-weight: 500; letter-spacing: .02em;
+    padding: 6px 18px; border: 0; border-radius: 6px; background: transparent;
+    color: var(--muted); cursor: pointer;
+  }
+  .toggle button[aria-pressed="true"] { background: var(--surface); color: var(--fg); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+  .toggle button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  h2 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; margin: 0; }
+  section { display: flex; flex-direction: column; gap: 16px; }
+
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .fact { background: var(--surface); padding: 14px 16px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .fact dt { font-size: 12px; font-family: var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .fact dd { margin: 0; font-family: var(--mono); font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+  .fact dd.absent { color: var(--ok); }
+
+  figure { margin: 0; display: flex; flex-direction: column; gap: 10px; }
+  .figscroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
+  figure svg { display: block; max-width: 100%; height: auto; color: var(--fg); }
+  figcaption { font-size: 14px; color: var(--muted); max-width: 70ch; }
+
+  .sg { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
+  .sg + .sg { margin-top: 12px; }
+  .sg-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+  .sg-head h3 { margin: 0; font-size: 15px; font-weight: 600; font-family: var(--mono); }
+  .sg-head .role { font-size: 13px; color: var(--muted); }
+  .tblscroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { font-family: var(--mono); font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+  td { font-family: var(--mono); font-size: 13px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .dir { font-family: var(--sans); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .pub { color: var(--warn); font-weight: 500; }
+  .none td { color: var(--muted); font-style: italic; font-family: var(--sans); font-size: 13px; }
+  .note { padding: 11px 16px; font-size: 13.5px; color: var(--muted); border-top: 1px solid var(--border); background: var(--surface-2); max-width: none; }
+  .note strong { color: var(--fg); font-weight: 500; }
+
+  ul.checks { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  ul.checks li { display: grid; grid-template-columns: 22px 1fr; gap: 10px; align-items: start; font-size: 14.5px; }
+  ul.checks .mark { font-family: var(--mono); font-weight: 500; line-height: 1.6; }
+  .mark.ok { color: var(--ok); }
+  .mark.flag { color: var(--warn); }
+  code { font-family: var(--mono); font-size: .92em; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+
+  @media (max-width: 520px) {
+    body { padding-inline: 16px; }
+    .fact dd { font-size: 14px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">petclinic-platform · E-2 Networking</p>
+    <h1>Petclinic VPC Topology</h1>
+    <p class="lede">What the Terraform in <code>terraform/modules/vpc/</code> actually builds, for checking against the technical spec. Dev and prod differ only in CIDR and resource names — the security groups are identical.</p>
+    <div class="toggle" role="group" aria-label="Environment">
+      <button type="button" data-env="dev" aria-pressed="true">dev</button>
+      <button type="button" data-env="prod" aria-pressed="false">prod</button>
+    </div>
+  </header>
+
+  <section>
+    <dl class="facts">
+      <div class="fact"><dt>VPC CIDR</dt><dd data-dev="10.0.0.0/16" data-prod="10.1.0.0/16">10.0.0.0/16</dd></div>
+      <div class="fact"><dt>Subnet 1 · 1a</dt><dd data-dev="10.0.1.0/24" data-prod="10.1.1.0/24">10.0.1.0/24</dd></div>
+      <div class="fact"><dt>Subnet 2 · 1b</dt><dd data-dev="10.0.2.0/24" data-prod="10.1.2.0/24">10.0.2.0/24</dd></div>
+      <div class="fact"><dt>VPC name</dt><dd data-dev="petclinic-dev-vpc" data-prod="petclinic-prod-vpc">petclinic-dev-vpc</dd></div>
+      <div class="fact"><dt>NAT gateway</dt><dd class="absent">none — intentional</dd></div>
+      <div class="fact"><dt>Resources</dt><dd>25</dd></div>
+    </dl>
+  </section>
+
+  <figure>
+    <div class="figscroll">
+      <svg viewBox="0 0 760 430" role="img" width="760" aria-label="Topology: the internet reaches an internet gateway, which a single route table sends 0.0.0.0/0 traffic through to two public subnets in eu-central-1a and eu-central-1b, both inside one VPC. There is no NAT gateway and no private subnet.">
+        <defs>
+          <marker id="aA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="currentColor"></polygon>
+          </marker>
+        </defs>
+
+        <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+
+          <text x="380" y="24" text-anchor="middle" font-weight="500" fill="currentColor">Internet</text>
+
+          <rect x="306" y="38" width="148" height="46" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+          <text x="380" y="66" text-anchor="middle" fill="currentColor">Internet Gateway</text>
+
+          <line x1="380" y1="84" x2="380" y2="118" stroke="currentColor" stroke-width="1.4" marker-end="url(#aA)"></line>
+
+          <rect x="30" y="122" width="700" height="278" rx="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="7 5"></rect>
+          <text x="48" y="148" font-weight="500" fill="currentColor">VPC</text>
+          <text x="88" y="148" fill="currentColor" opacity="0.72" data-dev="10.0.0.0/16" data-prod="10.1.0.0/16">10.0.0.0/16</text>
+
+          <rect x="266" y="164" width="228" height="52" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+          <text x="380" y="185" text-anchor="middle" fill="currentColor">Route table · public</text>
+          <text x="380" y="203" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.72">0.0.0.0/0 → IGW</text>
+
+          <line x1="380" y1="216" x2="380" y2="240" stroke="currentColor" stroke-width="1.4"></line>
+          <line x1="200" y1="240" x2="560" y2="240" stroke="currentColor" stroke-width="1.4"></line>
+          <line x1="200" y1="240" x2="200" y2="256" stroke="currentColor" stroke-width="1.4" marker-end="url(#aA)"></line>
+          <line x1="560" y1="240" x2="560" y2="256" stroke="currentColor" stroke-width="1.4" marker-end="url(#aA)"></line>
+
+          <rect x="80" y="260" width="240" height="118" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+          <text x="96" y="283" font-weight="500" fill="currentColor">Public subnet 1</text>
+          <text x="96" y="303" fill="currentColor" opacity="0.72" data-dev="10.0.1.0/24" data-prod="10.1.1.0/24">10.0.1.0/24</text>
+          <text x="96" y="325" fill="currentColor" opacity="0.72">eu-central-1a</text>
+          <text x="96" y="349" font-size="11" fill="currentColor" opacity="0.62">public IP on launch</text>
+          <text x="96" y="366" font-size="11" fill="currentColor" opacity="0.62">elb = 1 · cluster = shared</text>
+
+          <rect x="440" y="260" width="240" height="118" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+          <text x="456" y="283" font-weight="500" fill="currentColor">Public subnet 2</text>
+          <text x="456" y="303" fill="currentColor" opacity="0.72" data-dev="10.0.2.0/24" data-prod="10.1.2.0/24">10.0.2.0/24</text>
+          <text x="456" y="325" fill="currentColor" opacity="0.72">eu-central-1b</text>
+          <text x="456" y="349" font-size="11" fill="currentColor" opacity="0.62">public IP on launch</text>
+          <text x="456" y="366" font-size="11" fill="currentColor" opacity="0.62">elb = 1 · cluster = shared</text>
+
+          <text x="380" y="420" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.62">No private subnets · no NAT gateway · no VPC endpoints</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>The network half. Every resource — EKS nodes, RDS, the ALB — lands in one of these two public subnets and reaches the internet through the gateway, which is what removes the NAT cost.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="figscroll">
+      <svg viewBox="0 0 900 420" role="img" width="900" aria-label="Security group flows: the internet reaches the ALB group on 80 and 443, the ALB group reaches the node group on 30000 to 32767 and on 8080, the node group reaches the cluster group on 443 and the cluster group reaches the node group on all traffic, the node group reaches the RDS group on 3306, and the node group talks to itself on all traffic.">
+        <defs>
+          <marker id="aB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="currentColor"></polygon>
+          </marker>
+          <marker id="aW" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="var(--warn)"></polygon>
+          </marker>
+        </defs>
+
+        <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+
+          <text x="450" y="26" text-anchor="middle" font-weight="500" fill="currentColor">Internet</text>
+          <line x1="450" y1="38" x2="450" y2="70" stroke="var(--warn)" stroke-width="1.8" marker-end="url(#aW)"></line>
+          <text x="462" y="59" font-size="11.5" fill="var(--warn)">80, 443 — the only public ingress</text>
+
+          <rect x="350" y="74" width="200" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+          <text x="450" y="99" text-anchor="middle" font-weight="500" fill="currentColor">ALB SG</text>
+          <text x="450" y="118" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.7">alb-sg</text>
+
+          <line x1="450" y1="130" x2="450" y2="236" stroke="currentColor" stroke-width="1.4" marker-end="url(#aB)"></line>
+          <text x="462" y="176" font-size="11.5" fill="currentColor" opacity="0.85">30000–32767 (target group)</text>
+          <text x="462" y="194" font-size="11.5" fill="currentColor" opacity="0.85">8080 (health checks)</text>
+
+          <rect x="30" y="240" width="200" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+          <text x="130" y="265" text-anchor="middle" font-weight="500" fill="currentColor">EKS Cluster SG</text>
+          <text x="130" y="284" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.7">eks-cluster-sg</text>
+
+          <rect x="350" y="240" width="200" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+          <text x="450" y="265" text-anchor="middle" font-weight="500" fill="currentColor">EKS Node SG</text>
+          <text x="450" y="284" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.7">eks-node-sg</text>
+
+          <rect x="670" y="240" width="200" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+          <text x="770" y="265" text-anchor="middle" font-weight="500" fill="currentColor">RDS SG</text>
+          <text x="770" y="284" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.7">rds-sg</text>
+
+          <line x1="350" y1="268" x2="232" y2="268" stroke="currentColor" stroke-width="1.4" marker-end="url(#aB)"></line>
+          <line x1="230" y1="268" x2="348" y2="268" stroke="currentColor" stroke-width="1.4" marker-end="url(#aB)"></line>
+          <text x="291" y="222" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.85">node → cluster: 443</text>
+          <text x="291" y="308" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.85">cluster → node: all, 10250</text>
+
+          <line x1="550" y1="268" x2="668" y2="268" stroke="currentColor" stroke-width="1.4" marker-end="url(#aB)"></line>
+          <text x="609" y="256" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.85">3306</text>
+
+          <path d="M 430 296 L 430 340 L 470 340 L 470 296" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#aB)"></path>
+          <text x="450" y="362" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.85">self: all</text>
+
+          <text x="770" y="332" text-anchor="middle" font-size="11.5" fill="var(--ok)">no egress rules</text>
+          <text x="130" y="332" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.62">egress: all → 0.0.0.0/0</text>
+          <text x="450" y="392" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.62">egress: all → 0.0.0.0/0</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>The perimeter. In an all-public design these four groups are what actually keep the nodes and the database off the internet — the subnets don't. Amber marks the single path open to <code>0.0.0.0/0</code>.</figcaption>
+  </figure>
+
+  <section>
+    <h2>Rules, group by group</h2>
+
+    <div class="sg">
+      <div class="sg-head"><h3>alb-sg</h3><span class="role">Application Load Balancer — the one public entry point</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Dir</th><th>Proto</th><th>Port</th><th>Source / destination</th></tr></thead>
+          <tbody>
+            <tr><td class="dir">Ingress</td><td>TCP</td><td>80</td><td class="pub">0.0.0.0/0</td></tr>
+            <tr><td class="dir">Ingress</td><td>TCP</td><td>443</td><td class="pub">0.0.0.0/0</td></tr>
+            <tr><td class="dir">Egress</td><td>TCP</td><td>30000–32767</td><td>EKS Node SG</td></tr>
+            <tr><td class="dir">Egress</td><td>TCP</td><td>8080</td><td>EKS Node SG</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>80 and 443 from the internet are the sanctioned exception</strong> to this project's no-open-ingress rule. Both are scoped to this group only.</p>
+    </div>
+
+    <div class="sg">
+      <div class="sg-head"><h3>eks-node-sg</h3><span class="role">Worker nodes — reachable only from the ALB and the cluster</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Dir</th><th>Proto</th><th>Port</th><th>Source / destination</th></tr></thead>
+          <tbody>
+            <tr><td class="dir">Ingress</td><td>All</td><td>All</td><td>EKS Cluster SG</td></tr>
+            <tr><td class="dir">Ingress</td><td>All</td><td>All</td><td>Self (EKS Node SG)</td></tr>
+            <tr><td class="dir">Ingress</td><td>TCP</td><td>10250</td><td>EKS Cluster SG</td></tr>
+            <tr><td class="dir">Ingress</td><td>TCP</td><td>30000–32767</td><td>ALB SG</td></tr>
+            <tr><td class="dir">Ingress</td><td>TCP</td><td>8080</td><td>ALB SG</td></tr>
+            <tr><td class="dir">Egress</td><td>All</td><td>All</td><td class="pub">0.0.0.0/0</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Nothing here comes from <code>0.0.0.0/0</code></strong> — every ingress rule names another security group. The 10250 rule is already covered by the allow-all-from-cluster rule above it, but the spec lists it separately so it stays.</p>
+    </div>
+
+    <div class="sg">
+      <div class="sg-head"><h3>eks-cluster-sg</h3><span class="role">EKS control plane</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Dir</th><th>Proto</th><th>Port</th><th>Source / destination</th></tr></thead>
+          <tbody>
+            <tr><td class="dir">Ingress</td><td>TCP</td><td>443</td><td>EKS Node SG</td></tr>
+            <tr><td class="dir">Egress</td><td>All</td><td>All</td><td class="pub">0.0.0.0/0</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="sg">
+      <div class="sg-head"><h3>rds-sg</h3><span class="role">MySQL — the tightest group in the stack</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Dir</th><th>Proto</th><th>Port</th><th>Source / destination</th></tr></thead>
+          <tbody>
+            <tr><td class="dir">Ingress</td><td>TCP</td><td>3306</td><td>EKS Node SG</td></tr>
+            <tr class="none"><td class="dir">Egress</td><td colspan="3">none — the group is deny-all outbound</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>3306 from the node group only, never <code>0.0.0.0/0</code>.</strong> Security groups are stateful, so MySQL replies travel back without an egress rule.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Deliberate choices worth a second look</h2>
+    <ul class="checks">
+      <li><span class="mark ok">✓</span><span>Two public subnets, two AZs, public IP on launch — matches the CIDR table in the spec.</span></li>
+      <li><span class="mark ok">✓</span><span>Subnets carry <code>kubernetes.io/cluster/petclinic-&lt;env&gt;=shared</code> and <code>kubernetes.io/role/elb=1</code>, verified in the plan output.</span></li>
+      <li><span class="mark ok">✓</span><span>No NAT gateway, no private subnets, no VPC endpoints.</span></li>
+      <li><span class="mark ok">✓</span><span><strong>Node SG ingress on 8080 from the ALB SG</strong> exists for the ALB's health checks. The Ingress sets <code>target-type: ip</code> with <code>healthcheck-port: "8080"</code>, and under the default VPC CNI pod-IP traffic is governed by the node SG — without it every target goes unhealthy. Now a row in the spec's node table.</span></li>
+      <li><span class="mark flag">!</span><span><strong>RDS SG has no egress rules.</strong> Nothing in the spec asks for them, and the group is stateful, so it is deny-all outbound. Easy to relax if RDS turns out to need a path out.</span></li>
+    </ul>
+  </section>
+
+</div>
+
+<script>
+  (function () {
+    var buttons = Array.prototype.slice.call(document.querySelectorAll('.toggle button'));
+    var nodes = Array.prototype.slice.call(document.querySelectorAll('[data-dev][data-prod]'));
+
+    function apply(env) {
+      nodes.forEach(function (el) {
+        var next = el.getAttribute('data-' + env);
+        if (next !== null && el.textContent !== next) el.textContent = next;
+      });
+      buttons.forEach(function (b) {
+        b.setAttribute('aria-pressed', String(b.getAttribute('data-env') === env));
+      });
+      try { localStorage.setItem('petclinic-vpc-env', env); } catch (e) {}
+    }
+
+    buttons.forEach(function (b) {
+      b.addEventListener('click', function () { apply(b.getAttribute('data-env')); });
+    });
+
+    var saved = null;
+    try { saved = localStorage.getItem('petclinic-vpc-env'); } catch (e) {}
+    apply(saved === 'prod' ? 'prod' : 'dev');
+  })();
+</script>

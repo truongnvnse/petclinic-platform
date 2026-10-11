@@ -1,0 +1,29 @@
+# Chart.yaml — the generic petclinic service chart (PETPLAT-39 … PETPLAT-47, E-16)
+#
+# One chart, eight releases. Every service in docs/technical-spec.md → "Service
+# Inventory" is this chart installed under a different release name, with its
+# own values file from helm-values/. Nothing here is service-specific — if you
+# find yourself wanting to add a service name to a template, the thing you want
+# belongs in helm-values/{service}.yaml instead.
+#
+# ---------------------------------------------------------------------------
+# Why `name` is petclinic-service and not the name of a service
+#
+# The release name is what names the objects: `helm upgrade --install
+# api-gateway helm/petclinic-service/` produces a Deployment called api-gateway,
+# a Service called api-gateway, and so on. That matters because the names are a
+# contract — k8s/base/ingress/ingress.yaml sends ALB traffic to `api-gateway:8080`
+# and every init container polls `config-server:8888` and
+# `discovery-server:8761`. See templates/_helpers.tpl → "petclinic-service.fullname".
+#
+# `appVersion` is the application version, not the chart version, and it is what
+# lands in the app.kubernetes.io/version label. It tracks the image tag family
+# (v1.0.0 is what scripts/build-push-ecr.sh pushed for PETPLAT-85); the exact
+# image tag lives in helm-values/{service}.yaml, not here.
+
+apiVersion: v2
+name: petclinic-service
+description: Generic Helm chart for the Spring Petclinic microservices — one release per service
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

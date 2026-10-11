@@ -79,7 +79,7 @@ docs/                                # Architecture docs, runbooks, ADRs
 | K8s namespace | petclinic-dev | petclinic-prod |
 | State key | petclinic/dev/terraform.tfstate | petclinic/prod/terraform.tfstate |
 | RDS instance | db.t4g.micro, single-AZ (free tier) | db.t4g.micro, single-AZ (free tier) |
-| EKS nodes | 2x t4g.small ARM (Graviton free trial) | 2x t4g.small ARM (Graviton free trial) |
+| EKS nodes | 2x t4g.medium ARM | 2x t4g.small ARM (Graviton free trial) |
 | Deploy mode | ArgoCD auto-sync | ArgoCD manual sync |
 | Replicas | 1 per service | 2+ per service, HPA |
 
@@ -122,7 +122,7 @@ kubectl port-forward svc/argocd-server -n argocd 8443:443
 argocd app sync {service}-{env}
 
 # Security scanning
-checkov -d terraform/modules/{module}
+uvx checkov -d terraform/modules/{module}
 ```
 
 ## MCP Servers (configured in .mcp.json)
@@ -131,7 +131,7 @@ Five MCP servers configured at the project level:
 
 | Server | Purpose |
 |--------|---------|
-| `awslabs.terraform-mcp-server` | AWS/AWSCC provider docs, Checkov scanning, terraform/terragrunt execution |
+| `terraform` | Terraform registry docs (providers, modules, policies) — HashiCorp official, runs via Docker |
 | `aws-knowledge-mcp` | AWS documentation search, regional availability, documentation reader |
 | `awslabs.aws-pricing-mcp-server` | Cost estimation for AWS services (RDS, EKS, EC2, ALB) |
 | `context7` | Up-to-date library documentation (Terraform, Kubernetes, Helm) |

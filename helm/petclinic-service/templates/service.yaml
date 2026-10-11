@@ -1,0 +1,33 @@
+{{/*
+service.yaml — ClusterIP Service for one petclinic service (PETPLAT-39 … PETPLAT-44)
+
+ClusterIP for all eight. The only public entry point is the ALB that
+k8s/base/ingress/ingress.yaml creates, and it forwards to exactly one of these —
+the api-gateway Service. Everything else is reachable only inside the cluster,
+which is what the "security groups are the perimeter" decision (ADR-0001) leaves
+the Service type to enforce.
+
+targetPort is the NAME of the container port, not its number, so the Service
+follows the container when helm-values/{service}.yaml changes service.port.
+*/}}
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: {{ include "petclinic-service.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+
+  labels:
+    {{- include "petclinic-service.labels" . | nindent 4 }}
+
+spec:
+  type: {{ .Values.service.type }}
+
+  ports:
+    - name: {{ .Values.service.portName }}
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.portName }}
+      protocol: TCP
+
+  selector:
+    {{- include "petclinic-service.selectorLabels" . | nindent 4 }}
