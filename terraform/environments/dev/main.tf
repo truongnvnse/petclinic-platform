@@ -97,9 +97,10 @@ module "eks" {
   # address, so the Kubernetes API is not reachable from the internet at large
   # even though the endpoint itself is public. When that address changes,
   # kubectl stops working while terraform keeps working — it talks to the AWS
-  # API, not the EKS API — so update this value and re-apply.
+  # API, not the EKS API — so update the variable in terraform.tfvars and
+  # re-apply.
   # See docs/eks-operations.md → "Procedure: update the API server allowlist".
-  cluster_endpoint_public_access_cidrs = ["42.115.43.46/32"]
+  cluster_endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
 
   # Not the spec's ["t4g.small"] — see the sizing note above the module call.
   # 17 pods/node and 4 GiB instead of 11 and 2 GiB, at the same 2 vCPU.

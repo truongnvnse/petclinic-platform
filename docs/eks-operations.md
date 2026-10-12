@@ -31,6 +31,16 @@
 | API server endpoint | Public, allowlisted to one `/32` | Public, allowlisted to one `/32` |
 | Terraform module | `terraform/modules/eks/` | `terraform/modules/eks/` |
 
+> **Node scaling note:** the values in that row are declared in
+> `terraform/environments/{dev,prod}/main.tf` (`node_min_size`, `node_max_size`,
+> `node_desired_size`) and exported as the `node_group_scaling` output.
+> `scripts/start-env.sh` reads that output rather than keeping its own copy of
+> the numbers, so editing the Terraform config is what changes what a restart
+> restores. `scripts/stop-env.sh` scales the group to min 0 / desired 0 to stop
+> paying for compute — a deliberate deviation from what Terraform declares, and
+> the reason a later `terraform apply` scales the nodes back up and undoes the
+> stop. `terraform plan` reports that as drift; it is not.
+
 > **Kubernetes version note:** `docs/technical-spec.md` records `1.29`, which AWS no longer offers — the oldest version creatable in `eu-central-1` is `1.31` in extended support. Both environments run `1.36`, the current standard-support release at the time of writing. The same applies to the AMI type: EKS stopped publishing Amazon Linux 2 AMIs on 2025-11-26, so `AL2023_ARM_64_STANDARD` replaces the spec's `AL2_ARM_64`.
 
 > **Node size note (2026-10-11):** dev runs `t4g.medium`, not the `t4g.small` the spec names, because `t4g.small` could not run the eight services. A t4g.small node caps at 11 pods (3 ENIs × 4 IPv4), so two nodes give 22 slots against the 23 needed once the 15 system pods are counted — `admin-server` never scheduled. It also reports only 1365 MiB allocatable, and four Spring Boot JVMs on one such node exceeded it; that node's kubelet stopped posting status and the node was lost. `t4g.medium` gives 17 pods per node and 4096 MiB at the same 2 vCPU. Prod still reads `t4g.small` here because it has not been deployed; it needs the same change before it is, since 16 prod replicas plus 15 system pods is 31 against the same 22-slot ceiling.
@@ -182,15 +192,17 @@ Both environments allowlist a single `/32`. The endpoint is public, so this list
    curl -s https://checkip.amazonaws.com
    ```
 
-2. Update the value in `terraform/environments/{dev,prod}/main.tf`:
+2. Update the value in `terraform/environments/{dev,prod}/terraform.tfvars`:
 
    ```hcl
-   module "eks" {
-     source = "../../modules/eks"
-     # …
-     cluster_endpoint_public_access_cidrs = ["203.0.113.10/32"]
-   }
+   cluster_endpoint_public_access_cidrs = ["203.0.113.10/32"]
    ```
+
+   It is a variable rather than a literal in `main.tf` because this address
+   changes on someone else's schedule. Both roots default it to `[]`, so a plan
+   against a clone with no `terraform.tfvars` fails on the module's validation —
+   *"must name at least one CIDR while the public endpoint is enabled"*. That
+   message describes the endpoint, not the cause; the cause is the missing file.
 
 3. Apply. Terraform talks to the AWS API rather than the EKS API, so this works even while kubectl is locked out:
 

@@ -9,6 +9,21 @@ aws_region  = "eu-central-1"
 environment = "dev"
 project     = "petclinic"
 
+# The workstation egress address allowed to reach the EKS public API endpoint.
+# The Kubernetes API is not reachable from anywhere else, so when this address
+# changes kubectl times out while terraform keeps working — terraform talks to
+# the AWS API, not the EKS API. That combination means a stale CIDR, not a
+# broken cluster.
+#
+# Read the current address with:
+#
+#   curl -s https://checkip.amazonaws.com
+#
+# A /32 is the point. Widening this to 0.0.0.0/0 exposes the Kubernetes API
+# server to the internet, and this list is the only thing in front of it.
+# See docs/eks-operations.md → "Procedure: update the API server allowlist".
+cluster_endpoint_public_access_cidrs = ["203.0.113.10/32"]
+
 # Apex domain whose existing Route 53 hosted zone backs the dev record
 # (petclinic-dev.{domain_name}). The zone must already exist — it is created by
 # registering the domain, not by Terraform.

@@ -88,6 +88,11 @@ output "node_group_name" {
   value       = module.eks.node_group_name
 }
 
+output "node_group_scaling" {
+  description = "Scaling config Terraform declares for the node group. scripts/start-env.sh reads this to restore the group after stop-env.sh scaled it to zero — the numbers live here rather than in the script so the two cannot disagree."
+  value       = module.eks.node_group_scaling
+}
+
 output "node_role_arn" {
   description = "IAM role ARN shared by the worker nodes"
   value       = module.eks.node_role_arn
@@ -185,7 +190,7 @@ output "dns_zone_name_servers" {
 }
 
 output "acm_certificate_arn" {
-  description = "Validated wildcard ACM certificate ARN — this is the value for the alb.ingress.kubernetes.io/certificate-arn annotation in k8s/base/ingress/ingress.yaml"
+  description = "Validated wildcard ACM certificate ARN — substituted into the alb.ingress.kubernetes.io/certificate-arn annotation by scripts/render-ingress.sh, which reads this output rather than having you copy it"
   value       = module.dns.certificate_arn
 }
 

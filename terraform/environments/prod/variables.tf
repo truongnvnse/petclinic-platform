@@ -23,6 +23,32 @@ variable "project" {
   default     = "petclinic"
 }
 
+variable "cluster_endpoint_public_access_cidrs" {
+  description = "CIDR blocks allowed to reach the EKS public API server endpoint. This is the workstation's egress address, so it changes whenever the ISP reassigns it — it lives here rather than in main.tf so the next change is a tfvars edit rather than a code edit. Read the current address with: curl -s https://checkip.amazonaws.com. See docs/eks-operations.md → \"Procedure: update the API server allowlist\"."
+
+  type = list(string)
+
+  # Empty by default for the same reason openai_api_key is: `terraform destroy`
+  # evaluates variable validations but skips resource preconditions, so a
+  # required variable would block teardown of the whole environment over a value
+  # destroy never reads.
+  #
+  # The consequence is worth stating because the error does not. With an empty
+  # list a plan fails on the eks module's own validation —
+  #
+  #   cluster_endpoint_public_access_cidrs must name at least one CIDR while the
+  #   public endpoint is enabled
+  #
+  # — which reads as a problem with the endpoint rather than as a missing
+  # tfvars entry. Seeing that on a fresh clone means terraform.tfvars is absent,
+  # not that the endpoint is misconfigured.
+  default = []
+
+  # The module validates the shape (at least one CIDR while the endpoint is
+  # public); the rule is deliberately not repeated here. Two copies of the same
+  # rule would drift, and the module is the single place that defines it.
+}
+
 variable "openai_api_key" {
   description = "OpenAI API key for genai-service, stored in Secrets Manager at petclinic/prod/openai-api-key. Supplied through terraform.tfvars (gitignored) or the TF_VAR_openai_api_key environment variable — never committed to Git. Ephemeral as well as sensitive, so the value is redacted from output and written to neither the state file nor plan.out. To change it, bump openai_api_key_version as well — the module explains why."
 

@@ -9,20 +9,44 @@ aws_region  = "eu-central-1"
 environment = "prod"
 project     = "petclinic"
 
+# The workstation egress address allowed to reach the EKS public API endpoint.
+# The Kubernetes API is not reachable from anywhere else, so when this address
+# changes kubectl times out while terraform keeps working — terraform talks to
+# the AWS API, not the EKS API. That combination means a stale CIDR, not a
+# broken cluster.
+#
+# Read the current address with:
+#
+#   curl -s https://checkip.amazonaws.com
+#
+# A /32 is the point. Widening this to 0.0.0.0/0 exposes the Kubernetes API
+# server to the internet, and this list is the only thing in front of it.
+# See docs/eks-operations.md → "Procedure: update the API server allowlist".
+cluster_endpoint_public_access_cidrs = ["203.0.113.10/32"]
+
 # OpenAI API key for genai-service. Terraform writes it to Secrets Manager at
 # petclinic/prod/openai-api-key; the ExternalSecret in
 # k8s/base/external-secrets/openai-api-key.yaml reads it from there into the
 # genai-service pod, so the value never enters Git or a manifest.
 #
-# Required — the variable has no default, and the plan fails if it is missing.
-# That is deliberate: an empty default would apply cleanly and only surface
-# later as an authentication error from genai-service. Prefer the environment
-# variable in CI, where nothing is written to disk:
+# Required to create or update the secret — the plan fails if it is missing or
+# shorter than 20 characters. The check is a precondition on the secret version,
+# not a required variable: the variable's default is "" deliberately, because
+# `terraform destroy` evaluates variable validations but skips preconditions,
+# and a required variable would block teardown of the whole environment over a
+# value destroy never reads.
+#
+# The failure is deliberate in the other direction too. A secret created empty
+# applies cleanly and only surfaces later as an authentication error from
+# genai-service, so a plan that stops and says why is the better outcome.
+# Supply the value here, or export it in the shell that runs plan and apply:
 #
 #   export TF_VAR_openai_api_key="sk-..."
 #
 # The variable is ephemeral, so the value is written to neither terraform.tfstate
-# nor plan.out — setting it here does not put it in those files.
+# nor plan.out — setting it here does not put it in those files. The other side
+# of that: a saved plan needs the value supplied again at apply time, not only
+# at plan time.
 #
 # To change the key later, bump openai_api_key_version in main.tf as well. The
 # write-only argument is never read back, so Terraform sees no difference from

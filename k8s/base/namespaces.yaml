@@ -9,17 +9,20 @@
 # (the audit level).
 #
 # ---------------------------------------------------------------------------
-# Applying this file to the running dev cluster
+# Applying this file
 #
-# petclinic-dev already exists — it was created out of band with `kubectl create
-# namespace` during the ESO install. Applying this file does not conflict with
-# that: `kubectl apply` on an existing Namespace updates its labels in place and
-# leaves its contents alone. Nothing running in petclinic-dev is disturbed, and
-# the namespace stops being unmanaged. (Namespaces are cheap to adopt and
-# expensive to recreate — deleting one deletes every pod, Service and Secret
-# inside it — so adoption, not replace, is the right move.)
+# On a rebuilt cluster — the normal cycle here, since dev is torn down between
+# working sessions — neither namespace exists and this file creates both.
 #
-# petclinic-prod does not exist yet and this file is what creates it.
+# It is also safe to re-apply where they already exist: `kubectl apply` on an
+# existing Namespace updates its labels in place and leaves its contents alone,
+# so nothing running in petclinic-dev is disturbed. (Namespaces are cheap to
+# adopt and expensive to recreate — deleting one deletes every pod, Service and
+# Secret inside it — so adoption, not replace, is the right move.)
+#
+# Apply this before the ExternalSecrets in k8s/base/external-secrets/: those
+# name petclinic-dev, and scripts/install-eso.sh creates only the
+# external-secrets namespace, not this one.
 #
 # ---------------------------------------------------------------------------
 # Pod Security Admission

@@ -54,6 +54,23 @@ output "node_group_arn" {
   value       = aws_eks_node_group.this.arn
 }
 
+output "node_group_scaling" {
+  description = "Scaling config this module declares for the node group, as the string \"<min> <max> <desired>\" — scripts/start-env.sh reads it with `terraform output -raw` and splits on the spaces. Exported because that script has to restore the group to these values after stop-env.sh scales it to zero, and reading them from here is what keeps the numbers from being restated in the script."
+
+  # The variables rather than aws_eks_node_group.this.scaling_config, and the
+  # difference matters: a refresh reads the LIVE scaling config into state, so
+  # after stop-env.sh has scaled the group to zero, the resource's own attribute
+  # would report zero — the one value start-env.sh cannot restore anything from.
+  # The variables are the declared intent and do not move when something edits
+  # the group out of band, which is the whole point of exporting them.
+  #
+  # A string rather than an object because the consumer is a shell script, and
+  # `terraform output -raw` refuses anything that is not a string. That refusal
+  # is the feature: converting this to an object does not silently hand the
+  # script a wrong number, it fails the script outright at the read.
+  value = "${var.node_min_size} ${var.node_max_size} ${var.node_desired_size}"
+}
+
 output "node_role_arn" {
   description = "IAM role ARN shared by the worker nodes"
   value       = aws_iam_role.node.arn

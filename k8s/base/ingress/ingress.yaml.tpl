@@ -1,4 +1,4 @@
-# ingress.yaml — external entry point for the API Gateway (PETPLAT-30)
+# ingress.yaml.tpl — external entry point for the API Gateway (PETPLAT-30)
 #
 # The AWS Load Balancer Controller watches this resource and provisions an
 # internet-facing ALB, an HTTPS listener on the ACM certificate, and a target
@@ -14,22 +14,27 @@
 #   * "/" → api-gateway:8080
 #
 # ---------------------------------------------------------------------------
-# The two Terraform-owned values below are already substituted, and this note is
-# how to regenerate them rather than a step still to do. Both were created by
-# Terraform and so could not be written here at authoring time:
+# This file is a TEMPLATE, not a manifest. Render it before applying:
 #
-# 1. ACM_CERTIFICATE_ARN — the validated wildcard certificate:
+#      ./scripts/render-ingress.sh --env dev
+#
+# The script substitutes the two placeholders below from Terraform outputs and
+# writes k8s/base/ingress/ingress.yaml, which is what kubectl applies. That
+# rendered file is gitignored; this .tpl is the tracked artifact, so the
+# account-specific values never enter Git.
+#
+# Both substituted values are created by Terraform and neither is imported, so
+# a full rebuild of an environment changes both:
+#
+# 1. <ACM_CERTIFICATE_ARN> — the validated wildcard certificate:
 #
 #      cd terraform/environments/dev
 #      terraform output -raw acm_certificate_arn
 #
-# 2. ALB_SECURITY_GROUP_ID — the ALB security group Terraform created:
+# 2. <ALB_SECURITY_GROUP_ID> — the ALB security group Terraform created:
 #
 #      cd terraform/environments/dev
 #      terraform output -raw alb_sg_id
-#
-# Re-read both after any change that recreates the certificate or the security
-# group — a full rebuild of dev will, since neither is imported.
 #
 # Note that applying this file with the placeholders still in place will NOT
 # fail. `<ACM_CERTIFICATE_ARN>` is a valid YAML scalar and metadata.annotations
@@ -42,7 +47,10 @@
 #   kubectl logs -n kube-system deploy/aws-load-balancer-controller
 #
 # So the absence of an apply-time error is not evidence that the substitution
-# happened — check the two values are real before assuming the Ingress is fine.
+# happened. render-ingress.sh is the guard that a bare `kubectl apply -f
+# ingress.yaml.tpl` does not have: it refuses to write an output file while
+# either Terraform output is empty, and it fails on a placeholder it did not
+# manage to replace.
 #
 # The security-groups annotation is what makes the platform's security group
 # design work. The node security group takes two rules sourced from the ALB
@@ -88,10 +96,9 @@ metadata:
   labels:
     app.kubernetes.io/name: api-gateway
     app.kubernetes.io/part-of: petclinic
-    # kubectl, not Helm: this file is applied by hand (or by
-    # scripts/install-lb-controller.sh), not rendered by the chart in
-    # helm/petclinic-service/. That chart has no ingress template — the Ingress
-    # is deliberately outside it, because there is one ALB for the whole
+    # kubectl, not Helm: the rendered file is applied by hand, not by the chart
+    # in helm/petclinic-service/. That chart has no ingress template — the
+    # Ingress is deliberately outside it, because there is one ALB for the whole
     # namespace rather than one per service, so it does not belong in a
     # per-service release. Every other raw manifest under k8s/base/ carries
     # managed-by: kubectl for the same reason.
@@ -117,8 +124,8 @@ metadata:
     # can still be hidden behind a healthy node.
     alb.ingress.kubernetes.io/target-type: ip
 
-    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:eu-central-1:550798137608:certificate/6c2d7b3c-bc68-4fab-9543-ecca7f8224c9"
-    alb.ingress.kubernetes.io/security-groups: "sg-0cf2bebb632685fc3"
+    alb.ingress.kubernetes.io/certificate-arn: "<ACM_CERTIFICATE_ARN>"
+    alb.ingress.kubernetes.io/security-groups: "<ALB_SECURITY_GROUP_ID>"
 
     # Listen on both ports and redirect 80 to 443. The HTTP listener exists
     # only to issue the redirect, so no request is ever served over plaintext.

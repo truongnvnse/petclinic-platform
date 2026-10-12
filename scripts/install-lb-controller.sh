@@ -442,12 +442,12 @@ cat <<EOF
 Done. The AWS Load Balancer Controller is installed in ${NAMESPACE} and will
 provision an ALB for any Ingress with ingressClassName: alb.
 
-Next: apply the Ingress so the ALB is created (PETPLAT-30). Substitute the two
-placeholders in k8s/base/ingress/ingress.yaml first:
+Next: apply the Ingress so the ALB is created (PETPLAT-30). Render it first —
+the tracked file is k8s/base/ingress/ingress.yaml.tpl and it carries two
+Terraform-owned placeholders, so applying the .tpl directly would succeed and
+then fail asynchronously:
 
-  cd terraform/environments/${ENV}
-  terraform output -raw acm_certificate_arn   # → <ACM_CERTIFICATE_ARN>
-  terraform output -raw alb_sg_id             # → <ALB_SECURITY_GROUP_ID>
+  ./scripts/render-ingress.sh --env ${ENV}
 
   kubectl apply -f k8s/base/ingress/ingress.yaml
   kubectl get ingress api-gateway -n petclinic-${ENV} --watch

@@ -64,9 +64,10 @@ module "eks" {
   # address, so the Kubernetes API is not reachable from the internet at large
   # even though the endpoint itself is public. When that address changes,
   # kubectl stops working while terraform keeps working — it talks to the AWS
-  # API, not the EKS API — so update this value and re-apply.
+  # API, not the EKS API — so update the variable in terraform.tfvars and
+  # re-apply.
   # See docs/eks-operations.md → "Procedure: update the API server allowlist".
-  cluster_endpoint_public_access_cidrs = ["42.115.43.46/32"]
+  cluster_endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
 
   node_instance_types = ["t4g.small"]
   node_min_size       = 2
@@ -173,12 +174,14 @@ module "rds" {
 # password and the instance are generated together, and a second copy would give
 # one credential two owners.
 #
-# openai_api_key has no value in this file and no default in the module. It
-# comes from terraform.tfvars, which is gitignored, or from
-# TF_VAR_openai_api_key. Supplying neither fails the plan rather than creating an
-# empty secret. In this environment that failure is the point: an empty API key
-# would apply cleanly and surface as a runtime authentication error from
-# genai-service, long after the apply that caused it.
+# openai_api_key has no value in this file. It comes from terraform.tfvars,
+# which is gitignored, or from TF_VAR_openai_api_key. Supplying neither is not a
+# missing-variable error — the root variable defaults to "" precisely so that
+# `terraform destroy` runs without a key — it fails the precondition on the
+# secret version, with a message that names the file to put it in. In this
+# environment that failure is the point: an empty API key would apply cleanly
+# and surface as a runtime authentication error from genai-service, long after
+# the apply that caused it.
 #
 # The ESO IRSA role that reads this secret is created inside the eks module,
 # which owns the OIDC provider its trust policy needs. Its ARN is exported as
