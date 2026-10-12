@@ -11,7 +11,7 @@ fullnameOverride: customers-service
 component: service
 image:
   name: customers-service
-  tag: "48d7745"
+  tag: "964e645"
 service:
   port: 8081
 # `mysql` is what switches the service off HSQLDB and onto the RDS instance.

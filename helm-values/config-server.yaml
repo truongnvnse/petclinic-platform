@@ -13,7 +13,7 @@ image:
   # v1.0.0 is the tag scripts/build-push-ecr.sh pushed for PETPLAT-85 and the
   # tag currently in ECR. CI replaces this with the commit SHA on every build
   # (PETPLAT-101) — never with `latest`.
-  tag: "48d7745"
+  tag: "964e645"
 service:
   port: 8888
 springProfiles: docker
