@@ -18,7 +18,7 @@ Review workflow YAML files in `.github/workflows/` for syntax, security, and adh
 ### 1. Structure
 - [ ] Workflow has a clear `on:` trigger section (push, workflow_dispatch, workflow_run, etc.)
 - [ ] Jobs are named following convention: build, scan, push, update-tags (CI only — ArgoCD handles deploy)
-- [ ] Reusable steps use workflows from `.github/workflows/reusable/`
+- [ ] Reusable workflows are referenced at the top level of `.github/workflows/` — a subdirectory in `uses:` is silently broken, and `actionlint` will not catch it
 - [ ] Steps have `name:` for readability in the Actions UI
 - [ ] `runs-on:` uses a pinned runner image (e.g., `ubuntu-latest` or specific version)
 

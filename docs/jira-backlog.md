@@ -1550,8 +1550,8 @@ Extract common workflow steps into reusable workflows or composite actions. Sinc
 **Technical Spec:** [CI/CD Pipeline](./technical-spec.md#cicd-pipeline)
 
 **Acceptance Criteria:**
-- [ ] `.github/workflows/reusable/ecr-login.yml` — reusable ECR login workflow
-- [ ] `.github/workflows/reusable/update-tags.yml` — reusable image tag update workflow
+- [ ] `.github/workflows/ecr-login.yml` — reusable ECR login workflow (top level of `.github/workflows/`; GitHub does not support subdirectories there)
+- [ ] `.github/workflows/update-tags.yml` — reusable image tag update workflow (same — top level)
 - [ ] Main workflows call reusable workflows
 - [ ] DRY: no duplicated steps between build-push and update-tags workflows
 
