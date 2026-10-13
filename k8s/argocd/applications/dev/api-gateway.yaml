@@ -1,0 +1,56 @@
+# k8s/argocd/applications/dev/api-gateway.yaml — PETPLAT-113
+#
+# ArgoCD Application for api-gateway in dev. Dev is auto-sync: a commit that
+# changes either values file below is deployed with no human in the loop.
+#
+# valueFiles resolve against `path` (the chart directory) — not against this
+# file, and not against the repo root. helm/petclinic-service +
+# ../../helm-values/... is helm-values/... at the root: the same two files, in
+# the same order, that the runbook passes to `helm upgrade --install`.
+#
+# releaseName keeps the Helm release called `api-gateway`, not
+# `api-gateway-dev`. The chart names every object after the release
+# (templates/_helpers.tpl → petclinic-service.fullname), and those names are a
+# contract: the Ingress sends ALB traffic to `api-gateway:8080`, so a release
+# named `api-gateway-dev` would produce a Service the ALB backend cannot find —
+# which surfaces as a 503, not as a sync error. helm-values/api-gateway.yaml sets
+# fullnameOverride as well, so the object names hold either way; this line keeps
+# the release record consistent with the installs already in the cluster.
+#
+# The image tag lives in helm-values/api-gateway.yaml, not here, and CI rewrites
+# it on every build. An Application can read Synced and Healthy while the pod
+# sits in ImagePullBackOff if that tag is missing from ECR — ArgoCD reports the
+# sync, the kubelet reports the pull.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: api-gateway-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/component: gitops
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/truongnvnse/petclinic-platform.git
+    targetRevision: main
+    path: helm/petclinic-service
+    helm:
+      releaseName: api-gateway
+      valueFiles:
+        - ../../helm-values/api-gateway.yaml
+        - ../../helm-values/dev.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: petclinic-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true

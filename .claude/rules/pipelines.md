@@ -9,10 +9,15 @@ paths:
 ## Workflow Structure
 
 ```
+# In THIS repo (petclinic-platform)
 .github/workflows/
-├── build-push.yml          # Build Docker images, push to ECR
 ├── update-image-tags.yml   # Commit image tag updates → ArgoCD deploys
 └── (reusable workflows go here too, at the top level)
+
+# In the APP repo (spring-petclinic-microservices) — read-only from here
+.github/workflows/
+├── build-push.yml          # Build Docker images, push to ECR, fire the dispatch
+└── build-image.yml         # The reusable workflow build-push.yml calls
 ```
 
 Every workflow lives directly in `.github/workflows/` — **no subdirectories**.
@@ -45,7 +50,7 @@ GitHub Actions handles **CI only**. ArgoCD handles **CD**. CI never runs `kubect
 ## Trigger Patterns
 
 - `build-push.yml`: trigger on push to `main` branch, path filter on application code
-- `update-image-tags.yml`: trigger after successful build-push (`workflow_run`), commits new SHA tag to helm-values
+- `update-image-tags.yml`: triggered by `repository_dispatch` (`app-image-built`) fired by the app repo's build-push. **Not** `workflow_run` — that only fires for workflows in the same repository, and the build runs in the app repo. Commits the new SHA to `helm-values/{service}.yaml` for the services in the payload only, never all eight
 
 ## GitHub Secrets
 

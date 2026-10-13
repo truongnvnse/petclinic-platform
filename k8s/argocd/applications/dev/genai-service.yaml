@@ -1,0 +1,60 @@
+# k8s/argocd/applications/dev/genai-service.yaml — PETPLAT-113
+#
+# ArgoCD Application for genai-service in dev. Dev is auto-sync: a commit that
+# changes either values file below is deployed with no human in the loop.
+#
+# valueFiles resolve against `path` (the chart directory) — not against this
+# file, and not against the repo root. helm/petclinic-service +
+# ../../helm-values/... is helm-values/... at the root: the same two files, in
+# the same order, that the runbook passes to `helm upgrade --install`.
+#
+# releaseName keeps the Helm release called `genai-service`, not
+# `genai-service-dev`. The chart names every object after the release
+# (templates/_helpers.tpl → petclinic-service.fullname), and those names are a
+# contract. helm-values/genai-service.yaml sets fullnameOverride as well, so the
+# object names hold either way — this line keeps the release record consistent
+# with the installs already in the cluster.
+#
+# genai-service is the one service whose runtime depends on a secret:
+# OPENAI_API_KEY, delivered as an environment variable by an ExternalSecret that
+# reads petclinic/dev/openai-api-key from Secrets Manager. If that ExternalSecret
+# is not Synced, the pod starts and then fails on first use — the Deployment
+# itself is Healthy, so ArgoCD reports green. The ExternalSecret is applied by
+# hand from k8s/base/external-secrets/ and is NOT managed by this Application.
+#
+# The image tag lives in helm-values/genai-service.yaml, not here, and CI
+# rewrites it on every build. An Application can read Synced and Healthy while
+# the pod sits in ImagePullBackOff if that tag is missing from ECR.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: genai-service-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: genai-service
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/component: gitops
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/truongnvnse/petclinic-platform.git
+    targetRevision: main
+    path: helm/petclinic-service
+    helm:
+      releaseName: genai-service
+      valueFiles:
+        - ../../helm-values/genai-service.yaml
+        - ../../helm-values/dev.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: petclinic-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true

@@ -1,3 +1,4 @@
+<!doctype html>
 <title>Petclinic VPC Topology</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -151,7 +152,7 @@
       <div class="fact"><dt>Subnet 2 · 1b</dt><dd data-dev="10.0.2.0/24" data-prod="10.1.2.0/24">10.0.2.0/24</dd></div>
       <div class="fact"><dt>VPC name</dt><dd data-dev="petclinic-dev-vpc" data-prod="petclinic-prod-vpc">petclinic-dev-vpc</dd></div>
       <div class="fact"><dt>NAT gateway</dt><dd class="absent">none — intentional</dd></div>
-      <div class="fact"><dt>Resources</dt><dd>25</dd></div>
+      <div class="fact"><dt>Resources</dt><dd>26</dd></div>
     </dl>
   </section>
 
@@ -256,7 +257,7 @@
           <path d="M 430 296 L 430 340 L 470 340 L 470 296" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#aB)"></path>
           <text x="450" y="362" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.85">self: all</text>
 
-          <text x="770" y="332" text-anchor="middle" font-size="11.5" fill="var(--ok)">no egress rules</text>
+          <text x="770" y="332" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.62">egress: all → 0.0.0.0/0</text>
           <text x="130" y="332" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.62">egress: all → 0.0.0.0/0</text>
           <text x="450" y="392" text-anchor="middle" font-size="11.5" fill="currentColor" opacity="0.62">egress: all → 0.0.0.0/0</text>
         </g>
@@ -322,11 +323,11 @@
           <thead><tr><th>Dir</th><th>Proto</th><th>Port</th><th>Source / destination</th></tr></thead>
           <tbody>
             <tr><td class="dir">Ingress</td><td>TCP</td><td>3306</td><td>EKS Node SG</td></tr>
-            <tr class="none"><td class="dir">Egress</td><td colspan="3">none — the group is deny-all outbound</td></tr>
+            <tr><td class="dir">Egress</td><td>All</td><td>All</td><td class="pub">0.0.0.0/0</td></tr>
           </tbody>
         </table>
       </div>
-      <p class="note"><strong>3306 from the node group only, never <code>0.0.0.0/0</code>.</strong> Security groups are stateful, so MySQL replies travel back without an egress rule.</p>
+      <p class="note"><strong>3306 from the node group only, never <code>0.0.0.0/0</code>.</strong> Outbound is unrestricted, as on the other three groups — the ingress rule is the restriction that matters, because nothing outside the node group can open a connection for that egress to answer.</p>
     </div>
   </section>
 
@@ -337,9 +338,14 @@
       <li><span class="mark ok">✓</span><span>Subnets carry <code>kubernetes.io/cluster/petclinic-&lt;env&gt;=shared</code> and <code>kubernetes.io/role/elb=1</code>, verified in the plan output.</span></li>
       <li><span class="mark ok">✓</span><span>No NAT gateway, no private subnets, no VPC endpoints.</span></li>
       <li><span class="mark ok">✓</span><span><strong>Node SG ingress on 8080 from the ALB SG</strong> exists for the ALB's health checks. The Ingress sets <code>target-type: ip</code> with <code>healthcheck-port: "8080"</code>, and under the default VPC CNI pod-IP traffic is governed by the node SG — without it every target goes unhealthy. Now a row in the spec's node table.</span></li>
-      <li><span class="mark flag">!</span><span><strong>RDS SG has no egress rules.</strong> Nothing in the spec asks for them, and the group is stateful, so it is deny-all outbound. Easy to relax if RDS turns out to need a path out.</span></li>
+      <li><span class="mark ok">✓</span><span><strong>All four groups have unrestricted egress</strong> — <code>All / All / 0.0.0.0/0</code>, matching the spec's table for each. Outbound is not where the perimeter is; every constraint in this document is an ingress rule naming a source group.</span></li>
     </ul>
   </section>
+
+  <footer style="border-top: 1px solid var(--border); padding-top: 18px; color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 18px;">
+    <span class="mono">Last updated: 2026-10-13</span>
+    <span>Companion to <code>docs/technical-spec.md</code> (the values) and <code>docs/infrastructure-overview.html</code> (the rest of the platform).</span>
+  </footer>
 
 </div>
 

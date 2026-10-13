@@ -1,0 +1,59 @@
+# k8s/argocd/applications/dev/customers-service.yaml — PETPLAT-113
+#
+# ArgoCD Application for customers-service in dev. Dev is auto-sync: a commit
+# that changes either values file below is deployed with no human in the loop.
+#
+# valueFiles resolve against `path` (the chart directory) — not against this
+# file, and not against the repo root. helm/petclinic-service +
+# ../../helm-values/... is helm-values/... at the root: the same two files, in
+# the same order, that the runbook passes to `helm upgrade --install`.
+#
+# releaseName keeps the Helm release called `customers-service`, not
+# `customers-service-dev`. The chart names every object after the release
+# (templates/_helpers.tpl → petclinic-service.fullname), and those names are a
+# contract. helm-values/customers-service.yaml sets fullnameOverride as well, so
+# the object names hold either way — this line keeps the release record
+# consistent with the installs already in the cluster.
+#
+# Two things this Application cannot see, both of which fail at pod start rather
+# than at sync:
+#   - the image tag in helm-values/customers-service.yaml — missing from ECR
+#     means ImagePullBackOff, while ArgoCD still reports Synced and Healthy
+#   - the RDS hostname in helm-values/dev.yaml — stale after a rebuild means
+#     UnknownHostException, not a wrong-database write
+#
+# customers-service is MySQL-backed, so it needs both the ExternalSecret
+# (k8s/base/external-secrets/) and the dev database block to be correct.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: customers-service-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: customers-service
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/component: gitops
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/truongnvnse/petclinic-platform.git
+    targetRevision: main
+    path: helm/petclinic-service
+    helm:
+      releaseName: customers-service
+      valueFiles:
+        - ../../helm-values/customers-service.yaml
+        - ../../helm-values/dev.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: petclinic-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true

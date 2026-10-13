@@ -1,0 +1,55 @@
+# k8s/argocd/applications/dev/discovery-server.yaml — PETPLAT-113
+#
+# ArgoCD Application for discovery-server in dev. Dev is auto-sync: a commit that
+# changes either values file below is deployed with no human in the loop.
+#
+# valueFiles resolve against `path` (the chart directory) — not against this
+# file, and not against the repo root. helm/petclinic-service +
+# ../../helm-values/... is helm-values/... at the root: the same two files, in
+# the same order, that the runbook passes to `helm upgrade --install`.
+#
+# releaseName keeps the Helm release called `discovery-server`, not
+# `discovery-server-dev`. The chart names every object after the release
+# (templates/_helpers.tpl → petclinic-service.fullname), and those names are a
+# contract: every service except config-server polls `discovery-server:8761` from
+# its init containers. helm-values/discovery-server.yaml sets fullnameOverride as
+# well, so the object names hold either way — this line keeps the release record
+# consistent with the installs already in the cluster.
+#
+# The image tag lives in helm-values/discovery-server.yaml, not here, and CI
+# rewrites it on every build. An Application can read Synced and Healthy while
+# the pod sits in ImagePullBackOff if that tag is missing from ECR — ArgoCD
+# reports the sync, the kubelet reports the pull.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: discovery-server-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: discovery-server
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/component: gitops
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/truongnvnse/petclinic-platform.git
+    targetRevision: main
+    path: helm/petclinic-service
+    helm:
+      releaseName: discovery-server
+      valueFiles:
+        - ../../helm-values/discovery-server.yaml
+        - ../../helm-values/dev.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: petclinic-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true

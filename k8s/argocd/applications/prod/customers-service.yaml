@@ -1,0 +1,59 @@
+# k8s/argocd/applications/prod/customers-service.yaml — PETPLAT-114
+#
+# ArgoCD Application for customers-service in prod. There is deliberately NO
+# `syncPolicy.automated` block: this Application reports OutOfSync and waits for
+# a human to run `argocd app sync customers-service-prod` or click Sync in the
+# UI. The omission is the policy — adding an empty `automated: {}` would turn
+# auto-sync on, which is the opposite of what prod is meant to do.
+#
+# valueFiles resolve against `path` (the chart directory) — not against this
+# file, and not against the repo root. helm/petclinic-service +
+# ../../helm-values/... is helm-values/... at the root: the same two files, in
+# the same order, that the runbook passes to `helm upgrade --install`.
+#
+# releaseName keeps the Helm release called `customers-service`, not
+# `customers-service-prod`. The chart names every object after the release
+# (templates/_helpers.tpl → petclinic-service.fullname), and those names are a
+# contract.
+#
+# customers-service is MySQL-backed. In prod the database is a second, separate
+# RDS instance from dev's, so the hostname in helm-values/prod.yaml is its own
+# value and not a copy of the dev one — a copy fails as UnknownHostException at
+# pod start, not as a wrong-database write.
+#
+# Prod is NOT deployable as it stands, and a sync will fail rather than surprise
+# you — helm-values/prod.yaml still carries the placeholder RDS endpoint
+# `REPLACE-ME-prod-rds-endpoint`, and the `petclinic-prod` ECR repositories have
+# no images in them. Both are prerequisites this Application cannot satisfy on
+# its own. Create the Application now so the set is complete and the dev work
+# has something to mirror; expect OutOfSync, not Synced.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: customers-service-prod
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: customers-service
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/component: gitops
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/truongnvnse/petclinic-platform.git
+    targetRevision: main
+    path: helm/petclinic-service
+    helm:
+      releaseName: customers-service
+      valueFiles:
+        - ../../helm-values/customers-service.yaml
+        - ../../helm-values/prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: petclinic-prod
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true

@@ -24,7 +24,7 @@ on:
 permissions:
   contents: write
 
-# Two dispatches arriving close together would race on the same eight files, and
+# Two dispatches arriving close together would race on the same values files, and
 # the loser would fail to fast-forward. Queued rather than cancelled: both SHAs
 # are real builds, and dropping the earlier one would leave the values files
 # pointing at an older image than the newest successful build.
@@ -33,30 +33,32 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # The eight services, in the order the ECR module creates them. Fixed here
-  # rather than read from the payload so a truncated or malformed payload cannot
-  # leave the values files half-updated — the loop either rewrites all eight or
-  # fails before the commit.
+  # The eight services, in the order the ECR module creates them. This is no
+  # longer the list that gets written — that is the dispatch payload — but it is
+  # still the allowlist every payload entry is checked against before it reaches
+  # a file path. It stays fixed here for that reason: it is the thing a malformed
+  # or hostile payload is measured against.
   #
-  # This writes all eight files, and build-push.yml no longer pushes all eight
-  # images. That mismatch is now confirmed rather than suspected, so read this
-  # before the first real dispatch.
+  # What gets written is what the build actually pushed. build-push.yml detects
+  # changed service directories with dorny/paths-filter and builds ONLY those, so
+  # its payload names a subset on almost every dispatch; only a change to
+  # pom.xml, docker/**, mvnw or .mvn/** matches the `shared` filter and selects
+  # all eight. Writing the subset is what keeps helm-values/ and ECR in
+  # agreement — writing all eight from a subset payload points the services that
+  # were not built at a tag that does not exist, and they go to ImagePullBackOff
+  # on their next pod replacement. That failure and its recovery are in
+  # docs/rollback-runbook.md → "Procedure: rollback when the tag is not in ECR".
   #
-  # The build detects changed service directories with dorny/paths-filter and
-  # builds ONLY those — so its dispatch payload names a subset. This workflow
-  # ignores the payload for deciding what to write (see the warning step below,
-  # which reports the divergence on every run) and stamps the same SHA into all
-  # eight files. For any service that was not built, that SHA is not in ECR, and
-  # the pods go to ImagePullBackOff. docs/rollback-runbook.md → "Rollback: a tag
-  # that is not in ECR" is the recovery.
+  # This matches PETPLAT-50's acceptance criteria, docs/technical-spec.md →
+  # "Update Image Tags Steps" step 2, the spec's own code sketch and PETPLAT-49's
+  # acceptance criteria, all of which say to write only the services in the
+  # payload.
   #
-  # The all-eight behaviour is a deliberate choice, made with the tradeoff
-  # stated: PETPLAT-50's acceptance criteria, docs/technical-spec.md → "Update
-  # Image Tags Steps" step 2, the spec's own code sketch and PETPLAT-49's
-  # acceptance criteria all say to write only the services in the payload. This
-  # workflow does the opposite on purpose. Changing it is a one-line edit —
-  # iterate ${SERVICES_IN_PAYLOAD} instead of ${SERVICES} below — but it is a
-  # decision, not a cleanup, so it is not made silently here.
+  # Never add `dev` or `prod` to this list. helm-values/{dev,prod}.yaml are the
+  # per-environment overlays, and the allowlist is the only thing that keeps this
+  # job off them — a name here becomes a path below, and `image.tag` written into
+  # an overlay would override the tag for every service in that environment at
+  # once. Only the eight service files carry an image tag this workflow owns.
   SERVICES: >-
     config-server discovery-server api-gateway customers-service
     visits-service vets-service genai-service admin-server
@@ -122,8 +124,9 @@ jobs:
           # before the shell ever sees the script, so a payload containing shell
           # metacharacters would execute. Through env it stays data.
           SHA: ${{ github.event.client_payload.sha }}
-          # Also from the payload. Used ONLY to check the assumption described
-          # above — never to decide which files are written.
+          # Also from the payload, and this is the list the job writes. Every
+          # entry is checked against SERVICES above before any of it reaches a
+          # file path — see the validation below.
           SERVICES_IN_PAYLOAD: ${{ github.event.client_payload.services }}
         run: |
           set -euo pipefail
@@ -142,23 +145,56 @@ jobs:
             exit 1
           fi
 
-          # The all-eight design above assumes build-push pushed all eight
-          # images at this SHA. It does not: it builds only the services whose
-          # directories changed. So a subset payload is the NORMAL case here,
-          # not an anomaly, and this warning is expected to fire on almost every
-          # dispatch — it is not a sign that something has gone wrong, it is the
-          # known divergence between the two workflows being reported.
+          # The payload is the write list, so it is validated before any of it
+          # reaches a path. `${service}` is interpolated into
+          # `helm-values/${service}.yaml` below, which makes an unchecked entry a
+          # path rather than a name — the allowlist is what keeps `../../secrets`
+          # a rejected string instead of a file this job edits and commits.
           #
-          # This does not change what gets written. It makes the mismatch
-          # visible in the run summary instead of only in the pods, which is the
-          # difference between a five-minute diagnosis and an hour of one.
-          if [[ -n "${SERVICES_IN_PAYLOAD// /}" ]]; then
-            payload_sorted=$(echo ${SERVICES_IN_PAYLOAD} | tr ' ' '\n' | sort | tr '\n' ' ')
-            all_sorted=$(echo ${SERVICES} | tr ' ' '\n' | sort | tr '\n' ' ')
-            if [[ "${payload_sorted}" != "${all_sorted}" ]]; then
-              echo "::warning::client_payload.services names a subset (${SERVICES_IN_PAYLOAD}), but this workflow writes the tag to all eight values files. The build pushed only that subset, so the other services now name a tag that is not in ECR — they will keep running on their existing pods until those pods are replaced, and then go to ImagePullBackOff. This is the expected consequence of the all-eight design; see the comment on SERVICES above and docs/rollback-runbook.md."
-            fi
+          # `case` with a quoted pattern rather than `[[ == *"${service}"* ]]`:
+          # the quoted portion of a case pattern is matched literally, so a
+          # payload entry of `*` is rejected. In the glob form it would satisfy
+          # the pattern and pass.
+          #
+          # An empty list is a contract violation rather than a no-op. The app
+          # repo dispatches only when its build job ran, and the build job runs
+          # only for changed services, so a payload naming none of them means the
+          # two workflows disagree about the payload's shape. Writing nothing and
+          # exiting green would hide that, and the cluster would stay on the old
+          # tag with no signal anywhere.
+          # `read` consumes one line, so a payload carrying a newline would be
+          # truncated at it: the tokens before the newline pass the allowlist,
+          # everything after is never seen, and the job exits green having
+          # written a subset. That is precisely the silent under-write the empty
+          # check below exists to prevent, so a newline is rejected as a
+          # malformed payload rather than quietly consumed. The producer joins
+          # with spaces (build-push.yml: `jq -r 'join(" ")'`), so a newline means
+          # the two workflows disagree about the payload's shape — the same
+          # signal the empty check is looking for.
+          if [[ "${SERVICES_IN_PAYLOAD}" == *$'\n'* ]]; then
+            echo "::error::client_payload.services contains a newline. The payload is a single space-separated line, and anything after a newline would be dropped without a trace. Nothing was written."
+            exit 1
           fi
+
+          read -r -a services_to_write <<< "${SERVICES_IN_PAYLOAD:-}"
+          if [[ ${#services_to_write[@]} -eq 0 ]]; then
+            echo "::error::client_payload.services is empty. A dispatch is sent only after a build, and a build runs only for changed services, so this payload should name at least one. Nothing was written."
+            exit 1
+          fi
+
+          for service in "${services_to_write[@]}"; do
+            case " ${SERVICES} " in
+              *" ${service} "*) ;;
+              *)
+                # The offending value is withheld for the same reason as the SHA
+                # above: this branch runs precisely because the value is not what
+                # it should be, and the runner parses `::error::` out of stdout.
+                # Length is enough to debug with.
+                echo "::error::client_payload.services contains an entry that is not one of the eight known services (${#service} characters; value withheld). The whole payload is rejected and nothing was written."
+                exit 1
+                ;;
+            esac
+          done
 
           # One yq invocation per file, and the loop is load-bearing rather than
           # stylistic. `yq -i '.image.tag = strenv(SHA)' helm-values/*.yaml` does
@@ -167,11 +203,14 @@ jobs:
           # the others untouched. Measured with v4.54.1 — admin-server.yaml ended
           # up holding ten documents and the other nine kept the old tag. Do not
           # collapse this loop.
-          for service in ${SERVICES}; do
+          for service in "${services_to_write[@]}"; do
             file="helm-values/${service}.yaml"
 
+            # Defence in depth. The allowlist above already guarantees this name
+            # is one of the eight, so reaching here means helm-values/ has lost a
+            # file the workflow expects rather than that the payload is bad.
             if [[ ! -f "${file}" ]]; then
-              echo "::error::${file} does not exist — the service list above and helm-values/ have drifted apart"
+              echo "::error::${file} does not exist. The name is in the allowlist, so helm-values/ is missing a service this workflow expects."
               exit 1
             fi
 
@@ -182,12 +221,12 @@ jobs:
             #   preserved  comments, key order, quoting, indentation
             #   collapsed  blank lines — 12 of them become 1 in config-server.yaml
             #
-            # So the FIRST run after this workflow is added rewrites all eight
-            # files and the diff is mostly deleted blank lines. That noise is
-            # one-time and self-correcting: yq's output is stable under a second
-            # pass, so from then on a repeat dispatch with the same SHA changes
-            # nothing, and a new SHA changes exactly one line per file. Worth
-            # knowing when reviewing the first CI commit — the tag change is one
+            # So the FIRST run after this workflow is added rewrites every file
+            # it touches and the diff is mostly deleted blank lines. That noise
+            # is one-time and self-correcting: yq's output is stable under a
+            # second pass, so from then on a repeat dispatch with the same SHA
+            # changes nothing, and a new SHA changes exactly one line per file.
+            # Worth knowing when reviewing a CI commit — the tag change is one
             # line of it, not the hundred.
             #
             # If the blank lines are wanted back, the fix is to commit yq's
@@ -200,7 +239,14 @@ jobs:
             yq -i '.image.tag = strenv(SHA)' "${file}"
           done
 
-          echo "SHA=${SHA}" >> "${GITHUB_ENV}"
+          # The commit step is a separate shell, so the list has to cross a step
+          # boundary. GITHUB_ENV is the only channel, and writing it there is
+          # safe only because every entry has been checked against the allowlist
+          # above — nothing unchecked reaches this line.
+          {
+            echo "SHA=${SHA}"
+            echo "SERVICE_LIST=${services_to_write[*]}"
+          } >> "${GITHUB_ENV}"
 
           echo "=== resulting diff ==="
           git --no-pager diff -- helm-values/
@@ -218,14 +264,17 @@ jobs:
           fi
 
           # PETPLAT-50 fixes this format: "ci: update image tags to {sha} ({service-list})"
-          service_list=$(echo ${SERVICES} | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
-
-          # -u, not -A: stage modifications to the eight tracked values files and
+          # The list names the services this commit actually wrote — the dispatch
+          # payload, not all eight. That is the same shape the app repo's own
+          # commit messages use, so the two halves of the pipeline read alike, and
+          # the message describes the diff rather than a fixed roster.
+          #
+          # -u, not -A: stage modifications to the tracked values files and
           # nothing else. A new file appearing under helm-values/ is a change to
           # the service list, which is a human decision, not something this job
           # should commit on its own.
           git add -u helm-values/
-          git commit -m "ci: update image tags to ${SHA} (${service_list})"
+          git commit -m "ci: update image tags to ${SHA} (${SERVICE_LIST})"
 
           # ArgoCD sees this commit and syncs — dev automatically, prod after a
           # manual approval in the ArgoCD UI. Nothing else is needed to deploy.

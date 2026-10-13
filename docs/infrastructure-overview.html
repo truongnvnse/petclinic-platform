@@ -1,0 +1,1384 @@
+<!doctype html>
+<title>Petclinic Platform Infrastructure</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  /* ---------------------------------------------------------------
+     Same design system as docs/vpc-topology.html — cool blue-grey
+     neutrals, teal accent, amber for the one thing open to the
+     internet. Plex Sans for prose, Plex Mono for every config value.
+     --------------------------------------------------------------- */
+  :root {
+    --bg:        #f4f6f9;
+    --surface:   #ffffff;
+    --surface-2: #eef1f5;
+    --fg:        #14181f;
+    --muted:     #5a6472;
+    --border:    #d9dee6;
+    --accent:    #0d6d78;
+    --accent-sf: #e2f1f2;
+    --warn:      #9a5b06;
+    --warn-sf:   #fdf0dc;
+    --ok:        #2f6b3f;
+    --ok-sf:     #e6f2e9;
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0e1216;
+      --surface:   #161c22;
+      --surface-2: #1d242c;
+      --fg:        #e3e8ee;
+      --muted:     #8d97a5;
+      --border:    #29313a;
+      --accent:    #4cc9d4;
+      --accent-sf: #12333a;
+      --warn:      #e5a94a;
+      --warn-sf:   #33260f;
+      --ok:        #7cc48e;
+      --ok-sf:     #17301f;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0e1216;
+    --surface:   #161c22;
+    --surface-2: #1d242c;
+    --fg:        #e3e8ee;
+    --muted:     #8d97a5;
+    --border:    #29313a;
+    --accent:    #4cc9d4;
+    --accent-sf: #12333a;
+    --warn:      #e5a94a;
+    --warn-sf:   #33260f;
+    --ok:        #7cc48e;
+    --ok-sf:     #17301f;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    padding-inline: 20px;
+    padding-block: 40px 64px;
+  }
+  .wrap { max-width: 1000px; margin-inline: auto; display: flex; flex-direction: column; gap: 40px; }
+
+  header { display: flex; flex-direction: column; gap: 14px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  h1 { font-size: clamp(26px, 4vw, 34px); font-weight: 600; letter-spacing: -.02em; margin: 0; text-wrap: balance; }
+  .lede { margin: 0; color: var(--muted); max-width: 68ch; }
+
+  .toggle { display: inline-flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 3px; width: fit-content; }
+  .toggle button {
+    font-family: var(--mono); font-size: 13px; font-weight: 500; letter-spacing: .02em;
+    padding: 6px 18px; border: 0; border-radius: 6px; background: transparent;
+    color: var(--muted); cursor: pointer;
+  }
+  .toggle button[aria-pressed="true"] { background: var(--surface); color: var(--fg); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+  .toggle button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  h2 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; margin: 0; }
+  h3 { font-size: 15px; font-weight: 600; margin: 0; }
+  section { display: flex; flex-direction: column; gap: 16px; }
+  .sub { margin: 0; color: var(--muted); font-size: 14.5px; max-width: 72ch; }
+
+  /* The contents list. Two columns where there is room for two; the numbers
+     keep the reading order unambiguous either way. `scroll-margin-top` on the
+     headings keeps a jumped-to section off the very top edge of the viewport. */
+  .toc { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 14px 16px; }
+  .toc ol { margin: 0; padding-left: 20px; display: grid; gap: 5px; font-size: 14px; }
+  .toc li::marker { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .toc a { color: var(--fg); text-decoration: none; border-bottom: 1px solid transparent; }
+  .toc a:hover { border-bottom-color: var(--accent); }
+  .toc .scope { color: var(--muted); }
+  @media (min-width: 700px) { .toc ol { grid-template-columns: repeat(2, 1fr); column-gap: 28px; } }
+  h2 { scroll-margin-top: 18px; }
+
+  /* Twelve facts, and a column count that always divides twelve — 1, 2, 3 or
+     4 — so the grid never ends on a short row. `auto-fit` cannot promise
+     that: it will happily pick five columns at some widths and leave two
+     cells empty. Separators are drawn by the cells rather than by a gap over
+     a coloured container, for the same reason: a gap-based grid paints its
+     own background wherever a row is short, which reads as a hole. */
+  .facts { display: grid; grid-template-columns: repeat(1, 1fr); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  @media (min-width: 540px)  { .facts { grid-template-columns: repeat(2, 1fr); } }
+  @media (min-width: 800px)  { .facts { grid-template-columns: repeat(3, 1fr); } }
+  @media (min-width: 1060px) { .facts { grid-template-columns: repeat(4, 1fr); } }
+  .fact { padding: 14px 16px; display: flex; flex-direction: column; gap: 3px; min-width: 0; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .fact dt { font-size: 12px; font-family: var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .fact dd { margin: 0; font-family: var(--mono); font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+
+  figure { margin: 0; display: flex; flex-direction: column; gap: 10px; }
+  .figscroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
+  figure svg { display: block; max-width: 100%; height: auto; color: var(--fg); }
+  figcaption { font-size: 14px; color: var(--muted); max-width: 72ch; }
+
+  .card { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
+  .card + .card { margin-top: 12px; }
+  .card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+  .card-head h3 { font-family: var(--mono); }
+  .card-head .role { font-size: 13px; color: var(--muted); }
+  .tblscroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-family: var(--mono); font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); font-weight: 500; white-space: nowrap; }
+  td { font-size: 13.5px; }
+  td.mono, .mono { font-family: var(--mono); font-size: 13px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .note { padding: 11px 16px; font-size: 13.5px; color: var(--muted); border-top: 1px solid var(--border); background: var(--surface-2); max-width: none; }
+  .note strong { color: var(--fg); font-weight: 500; }
+
+  ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 14px; }
+  ol.steps > li { display: grid; grid-template-columns: 30px 1fr; gap: 12px; align-items: start; counter-increment: step; }
+  ol.steps > li::before {
+    content: counter(step);
+    font-family: var(--mono); font-size: 12px; font-weight: 500; line-height: 1.55;
+    display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent-sf); color: var(--accent); border: 1px solid var(--border);
+  }
+  ol.steps .what { font-weight: 500; }
+  ol.steps .where { color: var(--muted); font-size: 13.5px; }
+
+  ul.checks { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
+  ul.checks li { display: grid; grid-template-columns: 22px 1fr; gap: 10px; align-items: start; font-size: 14.5px; }
+  ul.checks .mark { font-family: var(--mono); font-weight: 500; line-height: 1.6; }
+  .mark.ok { color: var(--ok); }
+  .mark.flag { color: var(--warn); }
+  .mark.info { color: var(--accent); }
+  code { font-family: var(--mono); font-size: .92em; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+
+  /* The glossary. Collapsed by default, so a reader who already knows the stack
+     scrolls past six summary lines while a reader who does not opens the one
+     group they need. Each group is a definition list, and the two-column split
+     only kicks in where a 210px term column still leaves a readable measure. */
+  details.gloss { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
+  details.gloss + details.gloss { margin-top: 10px; }
+  details.gloss > summary { cursor: pointer; padding: 12px 16px; background: var(--surface-2); font-family: var(--mono); font-size: 13px; font-weight: 500; }
+  details.gloss > summary::marker { color: var(--muted); }
+  details.gloss > summary .count { font-family: var(--sans); font-size: 12.5px; font-weight: 400; color: var(--muted); }
+  details.gloss > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  details.gloss[open] > summary { border-bottom: 1px solid var(--border); }
+  dl.glossary { margin: 0; padding: 0; }
+  dl.glossary > div { padding: 10px 16px; border-bottom: 1px solid var(--border); display: grid; gap: 2px; }
+  @media (min-width: 720px) { dl.glossary > div { grid-template-columns: 200px 1fr; gap: 16px; align-items: baseline; } }
+  dl.glossary > div:last-child { border-bottom: 0; }
+  dl.glossary dt { font-family: var(--mono); font-size: 13px; font-weight: 500; }
+  dl.glossary dd { margin: 0; font-size: 13.5px; color: var(--muted); }
+  dl.glossary dd strong { color: var(--fg); font-weight: 500; }
+
+  @media (max-width: 520px) {
+    body { padding-inline: 16px; }
+    .fact dd { font-size: 14px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">petclinic-platform · infrastructure overview</p>
+    <h1>Petclinic Platform Infrastructure</h1>
+    <p class="lede">Everything this repo builds, on one page: the AWS resources, the GitHub pipelines that build and tag the images, and the ArgoCD layer that deploys them. Companion to <code>docs/vpc-topology.html</code>, which covers the network and security groups in detail.</p>
+    <div class="toggle" role="group" aria-label="Environment">
+      <button type="button" data-env="dev" aria-pressed="true">dev</button>
+      <button type="button" data-env="prod" aria-pressed="false">prod</button>
+    </div>
+  </header>
+
+  <section>
+    <nav class="toc" aria-label="Contents">
+      <ol>
+        <li><a href="#plain">The stack, in plain language</a> <span class="scope">— start here if the terms are new</span></li>
+        <li><a href="#glossary">Glossary</a></li>
+        <li><a href="#architecture">What exists, and how a request reaches it</a></li>
+        <li><a href="#pipeline">The path from a commit to a running pod</a></li>
+        <li><a href="#aws">The AWS layer</a></li>
+        <li><a href="#cluster">Inside the cluster</a></li>
+        <li><a href="#argocd">The ArgoCD layer</a></li>
+        <li><a href="#github">The GitHub layer</a></li>
+        <li><a href="#values">Where a value lives</a></li>
+        <li><a href="#surprises">Things that will surprise you</a></li>
+        <li><a href="#not-covered">What this document does not cover</a> <span class="scope">— read this before assuming something is missing</span></li>
+      </ol>
+    </nav>
+
+    <dl class="facts">
+      <div class="fact"><dt>AWS account</dt><dd>550798137608</dd></div>
+      <div class="fact"><dt>Region</dt><dd>eu-central-1</dd></div>
+      <div class="fact"><dt>Cluster</dt><dd data-dev="petclinic-dev" data-prod="petclinic-prod">petclinic-dev</dd></div>
+      <div class="fact"><dt>Kubernetes</dt><dd>1.36</dd></div>
+      <div class="fact"><dt>Nodes</dt><dd data-dev="2 × t4g.medium" data-prod="2 × t4g.small">2 × t4g.medium</dd></div>
+      <div class="fact"><dt>Namespace</dt><dd data-dev="petclinic-dev" data-prod="petclinic-prod">petclinic-dev</dd></div>
+      <div class="fact"><dt>Database</dt><dd>db.t4g.micro · single-AZ</dd></div>
+      <div class="fact"><dt>Hostname</dt><dd data-dev="petclinic-dev.gannet.click" data-prod="petclinic.gannet.click">petclinic-dev.gannet.click</dd></div>
+      <div class="fact"><dt>VPC</dt><dd data-dev="10.0.0.0/16" data-prod="10.1.0.0/16">10.0.0.0/16</dd></div>
+      <div class="fact"><dt>State key</dt><dd data-dev="petclinic/dev/terraform.tfstate" data-prod="petclinic/prod/terraform.tfstate">petclinic/dev/terraform.tfstate</dd></div>
+      <div class="fact"><dt>State lock</dt><dd>petclinic-terraform-locks</dd></div>
+      <div class="fact"><dt>Deploy</dt><dd data-dev="ArgoCD auto-sync" data-prod="ArgoCD manual sync">ArgoCD auto-sync</dd></div>
+    </dl>
+  </section>
+
+  <!-- ===================== PLAIN LANGUAGE ===================== -->
+
+  <section>
+    <h2 id="plain">The stack, in plain language</h2>
+    <p class="sub">If Kubernetes, Helm and GitOps are new to you, read this section first. It builds the stack from the bottom up and says what each layer is <em>for</em>, not how to operate it. The rest of the page assumes you have read it, and the glossary at the end defines every term the page uses.</p>
+
+    <ol class="steps">
+      <li>
+        <div>
+          <div class="what">Eight small programs, together making one application</div>
+          <div class="where">Each service does a single job: one serves configuration, one is the phone book the others use to find each other, one takes web requests, and the rest hold the actual data. They are ordinary Java programs — nothing about them knows they are going to run in a cloud.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what">Containers — a program frozen together with everything it needs</div>
+          <div class="where">A <em>container image</em> is a program plus its exact runtime and settings, packaged into one file. A <em>container</em> is that image running. The point is that it behaves the same on a laptop and on a server, because it carries its own environment with it. Images here are built by GitHub and stored in <strong>ECR</strong>, Amazon's image warehouse — one repository per service per environment, so a dev image can never be mistaken for a prod one.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what">Kubernetes — a pool of machines you describe a desired state to</div>
+          <div class="where">A <em>cluster</em> is a group of machines that Kubernetes treats as one pool. You do not say "run this on machine 2"; you say "keep two copies of <code>vets-service</code> running and healthy", and Kubernetes works continuously to make that true and keep it true. <strong>EKS</strong> is Amazon's managed version: AWS runs the control plane, you supply the machines. A <em>namespace</em> is a folder inside the cluster that stops names colliding — here one per environment, so dev and prod are the same chart with the same names in different boxes.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what">Helm — one template, eight sets of answers</div>
+          <div class="where">Kubernetes is configured with YAML files, and eight services across two environments would mean a great deal of near-identical YAML. <strong>Helm</strong> is a template engine for exactly that: one <em>chart</em> holds the shape, and a small <em>values</em> file per service supplies what differs — its port, its environment variables, what it must wait for. This repo has exactly one chart and uses it sixteen times.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what">GitOps — the repository is the truth, and a program enforces it</div>
+          <div class="where">The older way to deploy is for a person or a CI job to run <code>kubectl apply</code> against the cluster, which leaves nobody able to say what the cluster <em>should</em> contain. <strong>GitOps</strong> replaces that with a rule: Git says what should be running, and a program inside the cluster keeps reality matching it. That program is <strong>ArgoCD</strong>. It polls this repository, notices a changed image tag, and applies it — which is why no step in either pipeline ever runs <code>kubectl</code>.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what">Terraform — everything underneath the cluster, described as code</div>
+          <div class="where">The network, the machines, the database, the image warehouse and the DNS records are not created by hand. <strong>Terraform</strong> reads <code>.tf</code> files describing the resources you want and makes the AWS API calls to create them. It keeps its own record of what it made in a <em>state file</em>, which is how it knows what to change and what to leave alone.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what">Two repositories, one hand-off</div>
+          <div class="where">The application's source code lives in one repository; this infrastructure lives in another. The application repository builds images and, when it is done, sends a signal to this one. This repository writes the new tag into a values file and commits. ArgoCD sees the commit and deploys. <strong>The commit is the deployment signal</strong> — that single sentence is the whole design.</div>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="glossary">Glossary</h2>
+    <p class="sub">Every term the page uses, in plain language, grouped by where it comes from, with two groups at the end that cut across the rest. Open the group you need — each entry says what the thing <em>is</em> and, where it matters, what it does in <em>this</em> project specifically.</p>
+
+    <details class="gloss">
+      <summary>AWS — the account, the network and the perimeter <span class="count">13 terms</span></summary>
+      <dl class="glossary">
+        <div><dt>Region</dt><dd>The geographic location resources run in. Everything here is in <code>eu-central-1</code> (Frankfurt), so no request crosses a continent to reach the database.</dd></div>
+        <div><dt>Account</dt><dd>The billing and permission boundary. One account, <code>550798137608</code>. A resource in another account is invisible unless access is explicitly granted.</dd></div>
+        <div><dt>ARN</dt><dd><em>Amazon Resource Name</em> — the full, unambiguous name of one specific resource, such as <code>arn:aws:ecr:eu-central-1:550798137608:repository/petclinic-dev/vets-service</code>. Every permission is written against ARNs, which is why they appear throughout the IAM policies here rather than resource names.</dd></div>
+        <div><dt>VPC</dt><dd><em>Virtual Private Cloud</em> — your own private network inside AWS, with an IP range you choose. <code>10.0.0.0/16</code> in dev, <code>10.1.0.0/16</code> in prod.</dd></div>
+        <div><dt>CIDR notation</dt><dd>The <code>/16</code> in <code>10.0.0.0/16</code> — how many leading bits of the address are fixed, so the <em>smaller</em> the number the bigger the network. <code>/16</code> is 65,536 addresses, <code>/24</code> is 256, and <code>/32</code> is exactly one. The EKS API allowlist is a <code>/32</code> because it admits a single workstation and nothing else.</dd></div>
+        <div><dt>Subnet</dt><dd>A slice of that range, pinned to one availability zone. Every subnet here is <strong>public</strong> — it has a route to the internet. That is a deliberate cost decision, and it is why the security groups carry the entire burden of access control.</dd></div>
+        <div><dt>Availability zone</dt><dd>One isolated data centre within a region. The two subnets here sit in two different zones, which is what would let the network survive one of them failing — though with a single-AZ database, dev would not survive it in any useful sense.</dd></div>
+        <div><dt>Internet gateway</dt><dd>The single door between this VPC and the public internet. Without it nothing in these subnets could be reached from outside, or reach out.</dd></div>
+        <div><dt>Route table</dt><dd>The list saying where traffic leaving a subnet should go. There is one here, and its single non-local rule sends everything out through the internet gateway — that one line is what makes the subnets public.</dd></div>
+        <div><dt>Security group</dt><dd>A firewall attached to a resource. Each rule names a source and a port; anything not named is refused. In this design they <em>are</em> the perimeter, rather than a second layer behind one.</dd></div>
+        <div><dt>ALB</dt><dd><em>Application Load Balancer</em> — the one component that faces the internet. It terminates TLS, picks a healthy target and forwards the request.</dd></div>
+        <div><dt>Route 53</dt><dd>Amazon's DNS. It maps <code>petclinic-dev.gannet.click</code> onto the load balancer's address using an <em>alias</em> record, so the address can change without anyone editing DNS.</dd></div>
+        <div><dt>ACM</dt><dd><em>Amazon Certificate Manager</em> — holds the TLS certificate that makes <code>https://</code> work. Issued for <code>*.gannet.click</code>, so one certificate covers both environments.</dd></div>
+      </dl>
+    </details>
+
+    <details class="gloss">
+      <summary>AWS — the services <span class="count">21 terms</span></summary>
+      <dl class="glossary">
+        <div><dt>ECR</dt><dd><em>Elastic Container Registry</em> — the warehouse where built images are stored. One repository per service per environment.</dd></div>
+        <div><dt>Image tag mutability</dt><dd>Whether a tag that has already been pushed may be overwritten. Dev is <code>MUTABLE</code>, so a rebuilt image can reuse a tag; prod is <code>IMMUTABLE</code>, so a tag that exists can never come to mean different bytes than it did yesterday.</dd></div>
+        <div><dt>RDS</dt><dd><em>Relational Database Service</em> — Amazon runs MySQL for you and hands back a hostname and credentials. One instance per environment, <code>db.t4g.micro</code>, single-AZ.</dd></div>
+        <div><dt>DB subnet group</dt><dd>The list of subnets RDS is allowed to place its instance in. RDS requires one even when, as here, there is only one possible answer.</dd></div>
+        <div><dt>Parameter group</dt><dd>The database engine's settings, held by AWS rather than in a file — <code>petclinic-{env}-mysql8</code> here. Changing one is the thing <code>apply_immediately</code> decides the timing of: now, or at the next maintenance window.</dd></div>
+        <div><dt>Final snapshot</dt><dd>The backup RDS takes as its last act before being deleted. Dev skips it so a teardown leaves nothing behind to pay for; prod takes one, because deleting a database should not also be the end of the data.</dd></div>
+        <div><dt>Backup retention</dt><dd>How many days of automatic backups RDS keeps, and therefore how far back point-in-time recovery can reach. Seven days in dev, thirty in prod.</dd></div>
+        <div><dt>EBS</dt><dd><em>Elastic Block Store</em> — the virtual disks attached to EC2 instances, and so to the worker nodes. The node group's disks are <code>gp3</code>, the general-purpose SSD type, and encrypted. Kubernetes cannot use EBS on its own: it needs a <em>CSI driver</em>, the plugin that teaches it how to create and attach a disk, which is one of the four add-ons.</dd></div>
+        <div><dt>IAM</dt><dd><em>Identity and Access Management</em> — who, or what program, may call which AWS API. A <strong>role</strong> is an identity a program assumes temporarily instead of holding a password; a <strong>policy</strong> is the document listing what that role may do.</dd></div>
+        <div><dt>IRSA</dt><dd><em>IAM Roles for Service Accounts</em> — the mechanism that lets one pod hold AWS permissions with no key stored anywhere. A Kubernetes service account is tied to an IAM role, and the cluster's OIDC provider is what makes that claim trustworthy to AWS. The load balancer controller, the EBS driver and External Secrets all reach AWS this way; nothing in the cluster holds a long-lived credential.</dd></div>
+        <div><dt>Secrets Manager</dt><dd>A vault for passwords and API keys. Kubernetes reads from it at runtime instead of the value being written into a file.</dd></div>
+        <div><dt>Recovery window</dt><dd>How long a deleted secret can still be restored. Dev uses <code>0</code>, so a destroyed environment frees the name immediately and a rebuild can reuse it; prod uses seven days, so deleting a secret by mistake is recoverable.</dd></div>
+        <div><dt>CloudWatch</dt><dd>Amazon's logging and metrics service. Used for exactly one thing here: the EKS control-plane logs.</dd></div>
+        <div><dt>SNS</dt><dd><em>Simple Notification Service</em> — how AWS sends a message somewhere when something happens, usually triggered by a CloudWatch alarm. It appears in this page only to record that there is none.</dd></div>
+        <div><dt>EKS</dt><dd><em>Elastic Kubernetes Service</em> — Amazon's managed Kubernetes. AWS runs the control plane; you supply the machines.</dd></div>
+        <div><dt>Access entry</dt><dd>The modern way to grant a person or role the right to use a cluster, replacing the older ConfigMap. This cluster is configured so that even the identity that created it holds no automatic rights — an access entry is what makes <code>kubectl</code> work at all, which is why a green <code>terraform apply</code> is not by itself enough.</dd></div>
+        <div><dt>Node group</dt><dd>The set of identical worker machines Terraform manages as one unit — two of them in each environment.</dd></div>
+        <div><dt>OIDC</dt><dd><em>OpenID Connect</em> — the standard that lets a GitHub workflow prove "I am this repository, on this branch" and receive a short-lived AWS credential. It exists so that no AWS access key is ever stored in GitHub.</dd></div>
+        <div><dt>S3</dt><dd>Object storage — files in a bucket, addressed by key. Used here for one thing: the bucket holding Terraform's state file.</dd></div>
+        <div><dt>SSE</dt><dd><em>Server-side encryption</em> — AWS encrypting an object at rest, so the bytes on disk are unreadable without the key. Switched on for the state bucket.</dd></div>
+        <div><dt>DynamoDB</dt><dd>A managed key-value database. Used here for one thing: the lock table that stops two Terraform runs applying at the same time.</dd></div>
+      </dl>
+    </details>
+
+    <details class="gloss">
+      <summary>Kubernetes — the objects inside the cluster <span class="count">24 terms</span></summary>
+      <dl class="glossary">
+        <div><dt>Cluster</dt><dd>The pool of machines Kubernetes schedules work onto. Two nodes per environment here.</dd></div>
+        <div><dt>kubectl</dt><dd>The command-line tool for talking to a cluster — <code>kubectl get pods</code>, <code>kubectl logs</code>. Nothing in either pipeline runs it: humans do, and ArgoCD does the equivalent from inside the cluster.</dd></div>
+        <div><dt>Node</dt><dd>One machine in that pool. Pods run on nodes.</dd></div>
+        <div><dt>Add-on</dt><dd>A component AWS installs into the cluster and keeps updated, as opposed to one installed by hand. The four here are <code>coredns</code> (turns a service name into an address), <code>kube-proxy</code> (sends traffic to the right pod behind that name), <code>vpc-cni</code> (gives each pod a real IP from the VPC) and <code>aws-ebs-csi-driver</code> (creates and attaches disks). Metrics Server is <em>not</em> among them, which is the whole reason the HPA cannot scale.</dd></div>
+        <div><dt>Pod</dt><dd>The smallest thing Kubernetes runs: one or more containers sharing a network address. Almost always one container here.</dd></div>
+        <div><dt>Deployment</dt><dd>The object that says "keep N copies of this pod running". If a pod dies, the Deployment replaces it.</dd></div>
+        <div><dt>Replica</dt><dd>One copy of a pod. "Two replicas" means two copies running at once.</dd></div>
+        <div><dt>Service</dt><dd>A stable name and address in front of a set of pods, so a caller never needs to know which pod is where. It is how one service finds another by name.</dd></div>
+        <div><dt>Namespace</dt><dd>A folder inside the cluster that keeps names and permissions from colliding. One per environment: <code>petclinic-dev</code> and <code>petclinic-prod</code>.</dd></div>
+        <div><dt>ConfigMap</dt><dd>Non-secret configuration handed to a container — which Spring profiles to activate, for instance.</dd></div>
+        <div><dt>Secret</dt><dd>The same idea for sensitive values. Here the value does not live only in the cluster: it is synced from AWS Secrets Manager.</dd></div>
+        <div><dt>ServiceAccount</dt><dd>The identity a pod uses when it talks to the Kubernetes API or, through a role, to AWS.</dd></div>
+        <div><dt>Ingress</dt><dd>The rule saying "a request for this hostname goes to this Service". It is what causes a load balancer to be created at all — no Ingress, no ALB.</dd></div>
+        <div><dt>IngressClass</dt><dd>The name binding an Ingress to the controller that implements it. Here: <code>alb</code>. An Ingress naming a class that does not exist is ignored — no error, and no load balancer.</dd></div>
+        <div><dt>Init container</dt><dd>A container that runs to completion <em>before</em> the main one starts. Used here to make each service wait for <code>config-server</code> and <code>discovery-server</code>.</dd></div>
+        <div><dt>Readiness probe</dt><dd>A periodic check deciding whether a pod should receive traffic. Failing it removes the pod from the Service without restarting it.</dd></div>
+        <div><dt>Liveness probe</dt><dd>A periodic check deciding whether a pod is still alive. Failing it restarts the container.</dd></div>
+        <div><dt>Requests and limits</dt><dd>The CPU and memory a container is guaranteed, and the most it may use. Requests decide where the scheduler places it; limits decide when it is throttled or killed.</dd></div>
+        <div><dt>HPA</dt><dd><em>HorizontalPodAutoscaler</em> — an object that adds or removes replicas as load changes. It reads CPU usage from the Metrics Server.</dd></div>
+        <div><dt>PDB</dt><dd><em>PodDisruptionBudget</em> — a rule limiting how many replicas a voluntary action, such as a node upgrade, may take down at once.</dd></div>
+        <div><dt>Metrics Server</dt><dd>The component that collects per-pod CPU and memory. Without it an HPA has nothing to read.</dd></div>
+        <div><dt>CRD</dt><dd><em>Custom Resource Definition</em> — a way to teach Kubernetes a new kind of object. External Secrets and the load balancer controller each add their own set.</dd></div>
+        <div><dt>Operator</dt><dd>A program running in the cluster that watches for a custom object and makes the real world match it. External Secrets is one here: it watches for a request naming an AWS secret, and creates the Kubernetes Secret that request describes.</dd></div>
+        <div><dt>Pod Security Standard</dt><dd>Labels on a namespace that make Kubernetes reject pods asking for more privilege than the level allows. Both workload namespaces here enforce <code>baseline</code>.</dd></div>
+      </dl>
+    </details>
+
+    <details class="gloss">
+      <summary>Helm — one chart, eight releases <span class="count">4 terms</span></summary>
+      <dl class="glossary">
+        <div><dt>Chart</dt><dd>A package of Kubernetes templates plus their defaults. This repo has exactly one, used by all eight services.</dd></div>
+        <div><dt>Values file</dt><dd>The small YAML that fills in a chart's blanks. One per service, plus one per environment.</dd></div>
+        <div><dt>Release</dt><dd>One installed instance of a chart. Eight services means eight releases of the same chart in one namespace.</dd></div>
+        <div><dt>Render</dt><dd>Turning a chart plus values into plain Kubernetes YAML <em>without</em> applying it. <code>helm template</code> is how this repo checks a change before committing it.</dd></div>
+      </dl>
+    </details>
+
+    <details class="gloss">
+      <summary>GitOps and ArgoCD <span class="count">11 terms</span></summary>
+      <dl class="glossary">
+        <div><dt>GitOps</dt><dd>The practice of treating a Git repository as the source of truth for what runs in a cluster, with a program inside the cluster keeping the two in agreement.</dd></div>
+        <div><dt>ArgoCD</dt><dd>That program. It polls this repository, compares it against the cluster, and applies the difference.</dd></div>
+        <div><dt>Application</dt><dd>ArgoCD's unit of work: "this repository path, with these values files, into this namespace". Sixteen of them here.</dd></div>
+        <div><dt>Sync</dt><dd>ArgoCD applying Git's version to the cluster.</dd></div>
+        <div><dt>Drift</dt><dd>The cluster no longer matching Git — usually because somebody changed something by hand.</dd></div>
+        <div><dt>Prune</dt><dd>Deleting cluster objects that have been removed from Git.</dd></div>
+        <div><dt>Self-heal</dt><dd>Reverting a manual change back to what Git says.</dd></div>
+        <div><dt>Synced / OutOfSync</dt><dd>Whether the cluster currently matches Git. This is <em>separate</em> from whether the workload is working.</dd></div>
+        <div><dt>Healthy / Degraded</dt><dd>Whether the pods are actually running. A revision can be <code>Synced</code> and <code>Degraded</code> at once — that is what a failing image pull looks like.</dd></div>
+        <div><dt>RBAC</dt><dd><em>Role-based access control</em> — who may do what in ArgoCD. Configured here so one group may sync dev and nobody may sync prod yet.</dd></div>
+        <div><dt>SSO</dt><dd><em>Single sign-on</em> — logging in through one central identity provider rather than a password per tool. ArgoCD's RBAC file names an SSO group that has never been created, which is why it currently grants nobody anything.</dd></div>
+      </dl>
+    </details>
+
+    <details class="gloss">
+      <summary>CI/CD — GitHub Actions <span class="count">12 terms</span></summary>
+      <dl class="glossary">
+        <div><dt>Workflow</dt><dd>One YAML file under <code>.github/workflows/</code> describing work GitHub should run.</dd></div>
+        <div><dt>Job</dt><dd>A unit inside a workflow. Jobs run in parallel unless one declares it needs another.</dd></div>
+        <div><dt>Step</dt><dd>One command or one action inside a job. Steps run in order.</dd></div>
+        <div><dt>Runner</dt><dd>The machine GitHub lends a job for its duration. Nothing persists on it afterwards.</dd></div>
+        <div><dt>Matrix</dt><dd>Running the same job once per item in a list — here, once per changed service, in parallel.</dd></div>
+        <div><dt>Reusable workflow</dt><dd>A workflow another workflow can call, so the build steps are written once instead of eight times.</dd></div>
+        <div><dt>Artifact</dt><dd>A file a job produces and keeps after it finishes, such as the Trivy scan report.</dd></div>
+        <div><dt>Commit SHA</dt><dd>The unique identifier of a commit. Used as the image tag, so a running container can be traced back to exact source.</dd></div>
+        <div><dt>Image tag</dt><dd>The label on an image version. <code>latest</code> is avoided because it is ambiguous; a commit SHA is exact.</dd></div>
+        <div><dt>Trivy</dt><dd>A scanner that inspects an image's installed packages and reports known vulnerabilities. It fails the build on <code>CRITICAL</code> ones.</dd></div>
+        <div><dt>CVE</dt><dd>A publicly catalogued security vulnerability — what Trivy reports.</dd></div>
+        <div><dt>repository_dispatch</dt><dd>A GitHub event one repository can send to another. It is the only way to trigger a workflow across repositories, which is why the hand-off between the two repos uses it.</dd></div>
+      </dl>
+    </details>
+
+    <details class="gloss">
+      <summary>Terraform — how the AWS side is described <span class="count">9 terms</span></summary>
+      <dl class="glossary">
+        <div><dt>Module</dt><dd>A reusable group of resource definitions. One per concern here: <code>vpc</code>, <code>eks</code>, <code>ecr</code>, <code>rds</code>, <code>secrets</code>, <code>dns</code>, <code>github-oidc</code>.</dd></div>
+        <div><dt>Root module</dt><dd>The directory that calls modules and supplies their values. <code>terraform/environments/dev</code> and <code>.../prod</code> are the two here.</dd></div>
+        <div><dt>Plan / apply</dt><dd><code>plan</code> shows what would change; <code>apply</code> makes the change. This repo never applies without a saved plan.</dd></div>
+        <div><dt>tfvars</dt><dd>The file holding values for a particular run. Gitignored here, because it holds a real workstation IP and a real API key.</dd></div>
+        <div><dt>Provider</dt><dd>The plugin that knows how to talk to a given API. Only <code>aws</code> and <code>random</code> are used, which is why Terraform never needs cluster access.</dd></div>
+        <div><dt>State file</dt><dd>Terraform's own record of what it created, and the only reason it can tell a change from a creation. Kept in S3 rather than on a laptop, so any machine can run the next apply.</dd></div>
+        <div><dt>State key</dt><dd>The path of one environment's state file inside that bucket — <code>petclinic/dev/terraform.tfstate</code>. One key per environment is what stops dev and prod from ever sharing a state file.</dd></div>
+        <div><dt>State lock</dt><dd>A marker Terraform takes while it runs, so two applies cannot interleave and corrupt the file. Held in DynamoDB here.</dd></div>
+        <div><dt>Bootstrap</dt><dd>The setup that must exist <em>before</em> Terraform can run at all — here the state bucket and the lock table, created once by <code>scripts/bootstrap-state.sh</code> rather than by Terraform itself.</dd></div>
+      </dl>
+    </details>
+
+    <details class="gloss">
+      <summary>Building for ARM — why every image is arm64 <span class="count">5 terms</span></summary>
+      <dl class="glossary">
+        <div><dt>CPU architecture</dt><dd>The instruction set a program is compiled for. An image built for one architecture will not start on the other — this is not a speed difference but a hard incompatibility, which is why the target architecture is a build-time decision and not a runtime one.</dd></div>
+        <div><dt>arm64</dt><dd>The 64-bit ARM architecture. Every image in this project targets <code>linux/arm64</code> and nothing else, because every node is ARM.</dd></div>
+        <div><dt>Graviton / t4g</dt><dd>Amazon's own ARM server chips. The <code>g</code> in <code>t4g.medium</code> and <code>db.t4g.micro</code> means Graviton, and that is the reason the whole project is ARM: Graviton instances cost less per hour than the Intel equivalents. It is a deliberate choice with a consequence, which the next two entries describe.</dd></div>
+        <div><dt>QEMU</dt><dd>An emulator that lets a machine of one architecture run code built for another. GitHub's runners are x86 and the target is ARM, so the build step installs QEMU first and the whole Maven build then runs emulated — slower than native, and the price of producing ARM images without an ARM runner.</dd></div>
+        <div><dt>buildx</dt><dd>The Docker plugin that can build for an architecture other than the host's. It is what consumes QEMU and produces the <code>linux/arm64</code> image.</dd></div>
+      </dl>
+    </details>
+
+    <details class="gloss">
+      <summary>The application — Spring Boot and Java <span class="count">7 terms</span></summary>
+      <dl class="glossary">
+        <div><dt>Spring Boot</dt><dd>The Java framework the eight services are written in. It supplies the web server, the health endpoints and the configuration loading, so each service is a little code plus a lot of convention.</dd></div>
+        <div><dt>Spring profile</dt><dd>A named switch that changes which settings load. <code>docker</code> makes a service read its configuration from the config server; <code>mysql</code> makes it talk to RDS instead of an in-memory database. A service runs with a list of them, and the list differs by service.</dd></div>
+        <div><dt>Actuator</dt><dd>Spring Boot's built-in management endpoints. <code>/actuator/health/readiness</code> and <code>/actuator/health/liveness</code> are not code anyone here wrote — they come free with the framework, and they are what the Kubernetes probes call.</dd></div>
+        <div><dt>JVM</dt><dd><em>Java Virtual Machine</em> — the program that runs compiled Java. It matters operationally because it holds a large fixed footprint: roughly 350 MiB resident, against a 128 MiB request. That gap is what once let the scheduler pack four services onto one node and take it down.</dd></div>
+        <div><dt>JDK / Temurin</dt><dd>The Java Development Kit — compiler and runtime together. <code>Temurin 17</code> is Eclipse's free build of it, and it serves as both the build image and the runtime base here.</dd></div>
+        <div><dt>Maven / mvnw</dt><dd>The build tool that turns Java source into a runnable jar. <code>mvnw</code> is its wrapper script, committed alongside the source so the build uses the pinned version rather than whatever happens to be installed on the runner.</dd></div>
+        <div><dt>Caffeine</dt><dd>An in-memory cache for Java. <code>vets-service</code> keeps its vet list in one, so repeated reads do not each become a database query.</dd></div>
+      </dl>
+    </details>
+  </section>
+
+  <!-- ===================== ARCHITECTURE ===================== -->
+
+  <section>
+    <h2 id="architecture">What exists, and how a request reaches it</h2>
+    <p class="sub">One request path from the internet to the database, with the security group and port on every hop. Everything sits in public subnets — the groups are the perimeter, not the subnet layout.</p>
+
+    <figure>
+      <div class="figscroll">
+        <svg viewBox="0 0 980 730" role="img" width="980" aria-label="Architecture: the internet reaches Route 53 for gannet.click, which aliases to an Application Load Balancer inside the VPC. The ALB accepts 80 and 443 from anywhere and forwards to the EKS nodes on ports 30000 to 32767 and 8080. The nodes run the petclinic-dev namespace with eight Deployments. The nodes reach RDS MySQL on 3306. Supporting services outside the VPC are ECR, Secrets Manager, IAM, the Terraform state bucket and lock table, and CloudWatch Logs.">
+          <defs>
+            <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <polygon points="0,1 10,5 0,9" fill="currentColor"></polygon>
+            </marker>
+          </defs>
+
+          <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+
+            <!-- internet -->
+            <rect x="360" y="16" width="200" height="44" rx="7" fill="none" stroke="var(--warn)" stroke-width="1.6"></rect>
+            <text x="460" y="43" text-anchor="middle" font-weight="500" fill="var(--warn)">Internet</text>
+
+            <line x1="460" y1="60" x2="460" y2="88" stroke="currentColor" stroke-width="1.4" marker-end="url(#a1)"></line>
+
+            <!-- route 53 -->
+            <rect x="300" y="90" width="320" height="54" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="316" y="112" font-weight="500" fill="currentColor">Route 53 · gannet.click</text>
+            <text x="316" y="131" font-size="11" fill="currentColor" opacity="0.7">A alias → ALB · cert *.gannet.click</text>
+
+            <line x1="460" y1="144" x2="460" y2="172" stroke="currentColor" stroke-width="1.4" marker-end="url(#a1)"></line>
+
+            <!-- vpc -->
+            <rect x="40" y="174" width="660" height="534" rx="10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="6 4"></rect>
+            <text x="60" y="199" font-weight="500" fill="currentColor">VPC · petclinic-dev-vpc · 10.0.0.0/16</text>
+            <text x="60" y="217" font-size="11" fill="currentColor" opacity="0.62">no NAT · no private subnets · no VPC endpoints — ADR-0001</text>
+
+            <!-- subnets -->
+            <rect x="70" y="230" width="290" height="42" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+            <text x="86" y="256" font-size="11.5" fill="currentColor" opacity="0.78">public-1 · eu-central-1a · 10.0.1.0/24</text>
+            <rect x="380" y="230" width="290" height="42" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+            <text x="396" y="256" font-size="11.5" fill="currentColor" opacity="0.78">public-2 · eu-central-1b · 10.0.2.0/24</text>
+
+            <!-- alb -->
+            <rect x="230" y="296" width="280" height="54" rx="7" fill="none" stroke="var(--warn)" stroke-width="1.6"></rect>
+            <text x="370" y="318" text-anchor="middle" font-weight="500" fill="var(--warn)">ALB · petclinic-dev-alb-sg</text>
+            <text x="370" y="337" text-anchor="middle" font-size="11" fill="var(--warn)" opacity="0.85">80 / 443 from 0.0.0.0/0</text>
+
+            <line x1="370" y1="350" x2="370" y2="380" stroke="currentColor" stroke-width="1.4" marker-end="url(#a1)"></line>
+            <text x="382" y="372" font-size="11" fill="currentColor" opacity="0.68">node-sg :30000-32767 · :8080</text>
+
+            <!-- eks -->
+            <rect x="90" y="382" width="560" height="174" rx="8" fill="none" stroke="var(--accent)" stroke-width="1.6"></rect>
+            <text x="108" y="406" font-weight="500" fill="var(--accent)">EKS · petclinic-dev · Kubernetes 1.36</text>
+            <text x="108" y="425" font-size="11" fill="currentColor" opacity="0.68">node group petclinic-dev-nodes · 2 × t4g.medium · AL2023_ARM_64</text>
+
+            <rect x="110" y="438" width="520" height="102" rx="6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3"></rect>
+            <text x="126" y="459" font-size="11.5" fill="currentColor" opacity="0.85">namespace petclinic-dev · 8 Deployments · 8 Services</text>
+            <text x="126" y="479" font-size="11" fill="currentColor" opacity="0.72">config-server · discovery-server · api-gateway</text>
+            <text x="126" y="497" font-size="11" fill="currentColor" opacity="0.72">customers-service · visits-service · vets-service</text>
+            <text x="126" y="515" font-size="11" fill="currentColor" opacity="0.72">genai-service · admin-server</text>
+            <text x="126" y="533" font-size="11" fill="currentColor" opacity="0.55">images pulled from ECR · secrets synced by ESO</text>
+
+            <line x1="370" y1="556" x2="370" y2="592" stroke="currentColor" stroke-width="1.4" marker-end="url(#a1)"></line>
+            <text x="382" y="578" font-size="11" fill="currentColor" opacity="0.68">rds-sg :3306 from node-sg only</text>
+
+            <!-- rds -->
+            <rect x="230" y="594" width="280" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="370" y="616" text-anchor="middle" font-weight="500" fill="currentColor">RDS · petclinic-dev-mysql</text>
+            <text x="370" y="635" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.68">MySQL 8.0 · db.t4g.micro · encrypted</text>
+
+            <!-- supporting inventory -->
+            <text x="730" y="199" font-weight="500" fill="currentColor">Also in the account</text>
+
+            <rect x="730" y="214" width="230" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+            <text x="744" y="236" font-size="11.5" fill="currentColor" opacity="0.9">ECR</text>
+            <text x="744" y="255" font-size="10.5" fill="currentColor" opacity="0.6">8 × petclinic-dev/{service}</text>
+
+            <rect x="730" y="284" width="230" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+            <text x="744" y="306" font-size="11.5" fill="currentColor" opacity="0.9">Secrets Manager</text>
+            <text x="744" y="325" font-size="10.5" fill="currentColor" opacity="0.6">petclinic/dev/{rds,openai}</text>
+
+            <rect x="730" y="354" width="230" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+            <text x="744" y="376" font-size="11.5" fill="currentColor" opacity="0.9">IAM · 6 roles</text>
+            <text x="744" y="395" font-size="10.5" fill="currentColor" opacity="0.6">2 OIDC providers</text>
+
+            <rect x="730" y="424" width="230" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+            <text x="744" y="446" font-size="11.5" fill="currentColor" opacity="0.9">S3 + DynamoDB</text>
+            <text x="744" y="465" font-size="10.5" fill="currentColor" opacity="0.6">terraform state · lock</text>
+
+            <rect x="730" y="494" width="230" height="56" rx="7" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+            <text x="744" y="516" font-size="11.5" fill="currentColor" opacity="0.9">CloudWatch Logs</text>
+            <text x="744" y="535" font-size="10.5" fill="currentColor" opacity="0.6">/aws/eks/petclinic-dev/cluster</text>
+
+            <text x="730" y="592" font-size="10.5" fill="currentColor" opacity="0.55">Amber = the only path</text>
+            <text x="730" y="608" font-size="10.5" fill="currentColor" opacity="0.55">open to 0.0.0.0/0.</text>
+            <text x="730" y="632" font-size="10.5" fill="currentColor" opacity="0.55">Everything else is</text>
+            <text x="730" y="648" font-size="10.5" fill="currentColor" opacity="0.55">group-to-group.</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>Every arrow is a security group rule, and each one names a source group rather than a CIDR — except the ALB's inbound 80/443. The database is reachable only from the node group, which is what makes putting it in a public subnet safe.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ===================== DEPLOYMENT FLOW ===================== -->
+
+  <section>
+    <h2 id="pipeline">The path from a commit to a running pod</h2>
+    <p class="sub">Two repositories and three systems. The app repo builds and pushes; this repo only ever commits a tag; ArgoCD does all the deploying. No step in either pipeline runs <code>kubectl</code> or <code>helm upgrade</code>.</p>
+
+    <ol class="steps">
+      <li>
+        <div>
+          <div class="what">A commit lands on <code>main</code> of the app repo</div>
+          <div class="where"><span class="mono">truongnvnse/spring-petclinic-microservices</span> — Java source only. The workflow has no <code>paths:</code> filter on its trigger, so every push starts the run; the filtering happens in the first job.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what"><code>changes</code> job decides what is worth building</div>
+          <div class="where"><span class="mono">dorny/paths-filter</span> maps each of the eight services to <code>spring-petclinic-{service}/**</code>. A change to <code>pom.xml</code>, <code>docker/**</code>, <code>mvnw</code> or <code>.mvn/**</code> matches the <code>shared</code> filter and selects all eight instead. Output is a JSON array of short service names.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what"><code>build</code> job runs once per selected service, in parallel</div>
+          <div class="where">A matrix over that array calls the reusable <code>build-image.yml</code>: Temurin 17, then QEMU + buildx, then <code>./mvnw -B -pl spring-petclinic-{service} -am package -DskipTests</code> produces the jar and a <strong>linux/arm64</strong> image from <code>docker/Dockerfile</code>. <strong>Tests do not run here</strong> — <code>maven-build.yml</code> owns them, so a green image build is not a green test run. Trivy runs twice — a CRITICAL,HIGH report that never fails, and a CRITICAL-only gate that blocks the push.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what">The image is pushed to ECR</div>
+          <div class="where"><span class="mono">550798137608.dkr.ecr.eu-central-1.amazonaws.com/petclinic-dev/{service}:{7-char SHA}</span> — the tag is the commit, never <code>latest</code>. Auth is OIDC: the job assumes a role via a short-lived token, never a stored access key.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what"><code>dispatch</code> job fires an event at this repo</div>
+          <div class="where"><span class="mono">repository_dispatch</span> type <code>app-image-built</code>, payload <code>{"sha":"…","services":"vets-service visits-service"}</code>. <code>workflow_run</code> cannot be used here — it only fires for workflows in the same repository, and the build ran in the other one.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what"><code>update-image-tags.yml</code> writes the tag into Git</div>
+          <div class="where">Validates the payload against a hardcoded allowlist of the eight services, then one <code>yq</code> call per file: <code>helm-values/{service}.yaml</code> gets the new <code>image.tag</code>. Commits as <code>github-actions[bot]</code>. <strong>Only the services in the payload are written</strong> — most dispatches name a subset, because most builds are a subset.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what">ArgoCD sees the commit and syncs</div>
+          <div class="where">One <code>Application</code> per service per environment, all pointing at <code>helm/petclinic-service</code> with that service's values file plus the environment overlay. ArgoCD watches the repository itself, not Actions events — which is why a push made with <code>GITHUB_TOKEN</code>, which triggers no workflows, still deploys.</div>
+        </div>
+      </li>
+      <li>
+        <div>
+          <div class="what">The Deployment rolls out</div>
+          <div class="where">Helm renders the chart and ArgoCD applies it. New pods pull the new tag, pass readiness on <code>/actuator/health/readiness</code>, and the old ones are retired.</div>
+        </div>
+      </li>
+    </ol>
+
+    <figure>
+      <div class="figscroll">
+        <svg viewBox="0 0 980 1104" role="img" width="980" aria-label="Deployment flow with its decision points. A push to the app repository starts GitHub Actions. The changes job runs paths-filter and branches three ways: a shared build input selects all eight services, a per-service change selects that subset, and a change to nothing buildable skips the build entirely. The build job runs one matrix entry per service with fail-fast false and calls the reusable build-image.yml, which checks out, sets up JDK 17, QEMU and buildx, logs in to ECR over OIDC, packages the jar and builds an arm64 image, then reaches the Trivy gate: a CRITICAL finding blocks the push and nothing deploys, a clean scan pushes the image to ECR. The dispatch job fires repository_dispatch at the platform repository only when every matrix entry succeeded. A workflow there validates the payload and commits the new tag into helm-values as github-actions bot. ArgoCD then branches on the sync policy: dev has an automated block and applies on its own, prod has no automated block and stays OutOfSync until a human syncs it. EKS rolls out the new pods.">
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <polygon points="0,1 10,5 0,9" fill="currentColor"></polygon>
+            </marker>
+            <marker id="aw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <polygon points="0,1 10,5 0,9" fill="var(--warn)"></polygon>
+            </marker>
+          </defs>
+
+          <g font-family="IBM Plex Mono, monospace" font-size="13">
+
+            <!-- ============ 1 · push ============ -->
+            <circle cx="58" cy="51" r="14" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+            <text x="58" y="56" text-anchor="middle" font-size="12" fill="currentColor">1</text>
+            <rect x="100" y="24" width="520" height="54" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="116" y="48" font-weight="500" fill="currentColor">git push · main</text>
+            <text x="116" y="67" font-size="11.5" fill="currentColor" opacity="0.7">spring-petclinic-microservices</text>
+
+            <rect x="660" y="30" width="300" height="48" rx="7" fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="1.2" stroke-dasharray="4 3"></rect>
+            <text x="676" y="50" font-size="11.5" fill="currentColor" opacity="0.75">cancel-in-progress: true</text>
+            <text x="676" y="67" font-size="11" fill="currentColor" opacity="0.55">a newer push cancels this run</text>
+
+            <line x1="360" y1="78" x2="360" y2="106" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+
+            <!-- ============ 2 · changes, three-way ============ -->
+            <circle cx="58" cy="133" r="14" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+            <text x="58" y="138" text-anchor="middle" font-size="12" fill="currentColor">2</text>
+            <rect x="100" y="106" width="520" height="54" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="116" y="130" font-weight="500" fill="currentColor">changes · dorny/paths-filter</text>
+            <text x="116" y="149" font-size="11.5" fill="currentColor" opacity="0.7">shared? · one filter per service · timeout 5 min</text>
+
+            <!-- fan out to a bus, then three short drops -->
+            <line x1="360" y1="160" x2="360" y2="174" stroke="currentColor" stroke-width="1.4"></line>
+            <line x1="180" y1="174" x2="540" y2="174" stroke="currentColor" stroke-width="1.4"></line>
+            <line x1="180" y1="174" x2="180" y2="188" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+            <line x1="360" y1="174" x2="360" y2="188" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+            <line x1="540" y1="174" x2="540" y2="188" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+
+            <rect x="100" y="190" width="160" height="52" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="180" y="211" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.6">shared matched</text>
+            <text x="180" y="230" text-anchor="middle" font-size="12.5" fill="currentColor">all 8 services</text>
+
+            <rect x="280" y="190" width="160" height="52" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="360" y="211" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.6">service matched</text>
+            <text x="360" y="230" text-anchor="middle" font-size="12.5" fill="currentColor">that subset</text>
+
+            <rect x="460" y="190" width="160" height="52" rx="7" fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="1.2" stroke-dasharray="4 3"></rect>
+            <text x="540" y="211" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.6">nothing matched</text>
+            <text x="540" y="230" text-anchor="middle" font-size="12.5" fill="currentColor" opacity="0.7">build skipped</text>
+
+            <!-- the dead end: a stub that goes nowhere, on purpose -->
+            <line x1="540" y1="242" x2="540" y2="258" stroke="currentColor" stroke-opacity="0.45" stroke-width="1.2" stroke-dasharray="4 3"></line>
+            <text x="540" y="274" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.55">no tag moves</text>
+
+            <!-- merge the two live branches back onto the spine -->
+            <line x1="180" y1="242" x2="180" y2="256" stroke="currentColor" stroke-width="1.4"></line>
+            <line x1="360" y1="242" x2="360" y2="256" stroke="currentColor" stroke-width="1.4"></line>
+            <line x1="180" y1="256" x2="360" y2="256" stroke="currentColor" stroke-width="1.4"></line>
+            <line x1="360" y1="256" x2="360" y2="296" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+
+            <!-- ============ 3 · build ============ -->
+            <circle cx="58" cy="323" r="14" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+            <text x="58" y="328" text-anchor="middle" font-size="12" fill="currentColor">3</text>
+            <rect x="100" y="296" width="520" height="54" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="116" y="320" font-weight="500" fill="currentColor">build · matrix ×N, in parallel</text>
+            <text x="116" y="339" font-size="11.5" fill="currentColor" opacity="0.7">fail-fast: false — one red does not cancel the other seven</text>
+
+            <rect x="660" y="300" width="300" height="48" rx="7" fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="1.2" stroke-dasharray="4 3"></rect>
+            <text x="676" y="320" font-size="11.5" fill="currentColor" opacity="0.75">id-token: write</text>
+            <text x="676" y="337" font-size="11" fill="currentColor" opacity="0.55">build job only — OIDC, no stored key</text>
+
+            <line x1="360" y1="350" x2="360" y2="378" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+
+            <rect x="100" y="378" width="520" height="92" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="116" y="402" font-weight="500" fill="currentColor">build-image.yml · reusable</text>
+            <text x="116" y="424" font-size="11.5" fill="currentColor" opacity="0.7">checkout → JDK 17 → QEMU → buildx → ECR login (OIDC)</text>
+            <text x="116" y="444" font-size="11.5" fill="currentColor" opacity="0.7">./mvnw -pl spring-petclinic-{svc} -am package -DskipTests</text>
+            <text x="116" y="462" font-size="11.5" fill="currentColor" opacity="0.7">build linux/arm64 from docker/Dockerfile</text>
+
+            <line x1="360" y1="470" x2="360" y2="496" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+
+            <!-- Trivy gate — a decision inside step 3, so no number of its own -->
+            <polygon points="360,496 496,538 360,580 224,538" fill="none" stroke="currentColor" stroke-width="1.4"></polygon>
+            <text x="360" y="534" text-anchor="middle" font-size="12.5" font-weight="500" fill="currentColor">Trivy gate</text>
+            <text x="360" y="551" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.62">CRITICAL</text>
+
+            <line x1="496" y1="538" x2="660" y2="538" stroke="var(--warn)" stroke-width="1.4" marker-end="url(#aw)"></line>
+            <text x="578" y="530" text-anchor="middle" font-size="11" fill="var(--warn)">found</text>
+
+            <rect x="660" y="514" width="300" height="48" rx="7" fill="none" stroke="var(--warn)" stroke-width="1.2" stroke-dasharray="4 3"></rect>
+            <text x="676" y="534" font-size="11.5" font-weight="500" fill="var(--warn)">push blocked · job red</text>
+            <text x="676" y="551" font-size="11" fill="currentColor" opacity="0.62">no tag reaches ECR, nothing deploys</text>
+
+            <text x="300" y="592" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.55">clean</text>
+            <line x1="360" y1="580" x2="360" y2="608" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+
+            <!-- ============ 4 · ECR ============ -->
+            <circle cx="58" cy="635" r="14" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+            <text x="58" y="640" text-anchor="middle" font-size="12" fill="currentColor">4</text>
+            <rect x="100" y="608" width="520" height="54" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="116" y="632" font-weight="500" fill="currentColor">push to Amazon ECR</text>
+            <text x="116" y="651" font-size="11.5" fill="currentColor" opacity="0.7" data-dev="petclinic-dev/{svc}:{7-char SHA}" data-prod="petclinic-prod/{svc}:{7-char SHA}">petclinic-dev/{svc}:{7-char SHA}</text>
+
+            <line x1="360" y1="662" x2="360" y2="690" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+
+            <!-- ============ 5 · dispatch ============ -->
+            <circle cx="58" cy="724" r="14" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+            <text x="58" y="729" text-anchor="middle" font-size="12" fill="currentColor">5</text>
+            <rect x="100" y="690" width="520" height="68" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="116" y="714" font-weight="500" fill="currentColor">dispatch · repository_dispatch</text>
+            <text x="116" y="734" font-size="11.5" fill="currentColor" opacity="0.7">app-image-built · { sha, services }</text>
+            <text x="116" y="752" font-size="11.5" fill="var(--warn)">skipped unless every matrix entry succeeded</text>
+
+            <line x1="360" y1="758" x2="360" y2="786" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+
+            <!-- ============ 6 · the commit ============ -->
+            <circle cx="58" cy="821" r="14" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+            <text x="58" y="826" text-anchor="middle" font-size="12" fill="currentColor">6</text>
+            <rect x="100" y="786" width="520" height="70" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="116" y="810" font-weight="500" fill="currentColor">update-image-tags.yml</text>
+            <text x="116" y="831" font-size="11.5" fill="currentColor" opacity="0.7">validate sha → allowlist → yq -i '.image.tag'</text>
+            <text x="116" y="849" font-size="11.5" fill="currentColor" opacity="0.7">commit as github-actions[bot]</text>
+
+            <rect x="660" y="792" width="300" height="54" rx="7" fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="1.2" stroke-dasharray="4 3"></rect>
+            <text x="676" y="812" font-size="11.5" fill="currentColor" opacity="0.75">cancel-in-progress: false</text>
+            <text x="676" y="830" font-size="11" fill="currentColor" opacity="0.55">both commits are real, so they queue</text>
+
+            <line x1="360" y1="856" x2="360" y2="884" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+            <text x="372" y="876" font-size="11" fill="currentColor" opacity="0.55">the commit is the signal</text>
+
+            <!-- ============ 7 · ArgoCD ============ -->
+            <circle cx="58" cy="926" r="14" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+            <text x="58" y="931" text-anchor="middle" font-size="12" fill="currentColor">7</text>
+            <polygon points="360,884 496,926 360,968 224,926" fill="none" stroke="var(--accent)" stroke-width="1.6"></polygon>
+            <text x="360" y="922" text-anchor="middle" font-size="12.5" font-weight="500" fill="var(--accent)">ArgoCD sync</text>
+            <text x="360" y="939" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.62">policy?</text>
+
+            <line x1="496" y1="926" x2="660" y2="926" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#ar)"></line>
+            <text x="578" y="918" text-anchor="middle" font-size="11" fill="var(--accent)">prod</text>
+
+            <rect x="660" y="900" width="300" height="52" rx="7" fill="none" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="4 3"></rect>
+            <text x="676" y="920" font-size="11.5" font-weight="500" fill="var(--accent)">no automated block</text>
+            <text x="676" y="937" font-size="11" fill="currentColor" opacity="0.62">waits for argocd app sync {svc}-prod</text>
+
+            <text x="300" y="980" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.55">dev · auto</text>
+            <line x1="360" y1="968" x2="360" y2="996" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"></line>
+
+            <!-- ============ 8 · rollout ============ -->
+            <circle cx="58" cy="1023" r="14" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+            <text x="58" y="1028" text-anchor="middle" font-size="12" fill="currentColor">8</text>
+            <rect x="100" y="996" width="520" height="54" rx="7" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="116" y="1020" font-weight="500" fill="currentColor">EKS · Deployment {svc} rolls out</text>
+            <text x="116" y="1039" font-size="11.5" fill="currentColor" opacity="0.7" data-dev="petclinic-dev namespace · readiness /actuator/health/readiness" data-prod="petclinic-prod namespace · readiness /actuator/health/readiness">petclinic-dev namespace · readiness /actuator/health/readiness</text>
+
+            <text x="100" y="1082" font-size="11.5" fill="currentColor" opacity="0.62">The commit is the deployment signal — ArgoCD polls the repository and never sees a GitHub event.</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>Every branch the pipeline actually takes. Steps 1–5 run in the app repo, step 6 in this one, steps 7–8 in the cluster. Two of them are gates: a CRITICAL image never reaches ECR, and a prod tag never reaches the cluster until a human syncs it.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ===================== AWS LAYER ===================== -->
+
+  <section>
+    <h2 id="aws">The AWS layer</h2>
+    <p class="sub">Seven Terraform modules, called from one root module per environment. Every resource is named <code>petclinic-{env}-{resource}</code>, with two deliberate exceptions: the cluster and its node group are named for the environment alone, so they read <code>petclinic-dev</code> and <code>petclinic-dev-nodes</code> rather than carrying an <code>-eks</code> suffix.</p>
+
+    <figure>
+      <div class="figscroll">
+        <svg viewBox="0 0 900 690" role="img" width="900" aria-label="Resource tree for the dev root module: module.vpc creates the VPC, two subnets, the internet gateway, a route table and four security groups. module.eks creates the cluster petclinic-dev, the node group, an OIDC provider, five IAM roles, four add-ons and a log group. module.ecr creates eight repositories. module.rds creates the database, a subnet group, a parameter group and the credentials secret. module.dns creates the wildcard certificate and the alias record. module.secrets creates the OpenAI key. module.github_oidc creates the OIDC provider and the CI role.">
+          <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+
+            <text x="40" y="30" font-weight="500" fill="currentColor">terraform/environments/dev</text>
+            <line x1="40" y1="46" x2="40" y2="650" stroke="currentColor" stroke-width="1.3"></line>
+
+            <!-- vpc -->
+            <line x1="40" y1="63" x2="62" y2="63" stroke="currentColor" stroke-width="1.3"></line>
+            <text x="70" y="68" font-weight="500" fill="currentColor">module.vpc</text>
+            <line x1="80" y1="86" x2="80" y2="146" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <line x1="80" y1="86" x2="90" y2="86" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="90" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-vpc · 10.0.0.0/16</text>
+            <line x1="80" y1="106" x2="90" y2="106" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="110" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-public-1, -2</text>
+            <line x1="80" y1="126" x2="90" y2="126" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="130" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-igw · petclinic-dev-public-rt</text>
+            <line x1="80" y1="146" x2="90" y2="146" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="150" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-{eks-cluster,eks-node,rds,alb}-sg + 14 rules</text>
+
+            <!-- eks -->
+            <line x1="40" y1="179" x2="62" y2="179" stroke="currentColor" stroke-width="1.3"></line>
+            <text x="70" y="184" font-weight="500" fill="currentColor">module.eks</text>
+            <line x1="80" y1="202" x2="80" y2="302" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <line x1="80" y1="202" x2="90" y2="202" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="206" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev — the cluster itself, Kubernetes 1.36</text>
+            <line x1="80" y1="222" x2="90" y2="222" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="226" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-nodes — node group, 2 × t4g.medium, gp3 encrypted</text>
+            <line x1="80" y1="242" x2="90" y2="242" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="246" font-size="11" fill="currentColor" opacity="0.8">cluster OIDC provider — the trust anchor for all three IRSA roles</text>
+            <line x1="80" y1="262" x2="90" y2="262" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="266" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-eks-cluster-role · petclinic-dev-eks-node-role</text>
+            <line x1="80" y1="282" x2="90" y2="282" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="286" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-ebs-csi-role · -lb-controller-role · -eso-role</text>
+            <line x1="80" y1="302" x2="90" y2="302" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="306" font-size="11" fill="currentColor" opacity="0.8">4 managed add-ons · 1 CloudWatch log group</text>
+
+            <!-- ecr -->
+            <line x1="40" y1="335" x2="62" y2="335" stroke="currentColor" stroke-width="1.3"></line>
+            <text x="70" y="340" font-weight="500" fill="currentColor">module.ecr</text>
+            <line x1="80" y1="358" x2="90" y2="358" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="362" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev/{8 services} · untagged expire 7d · keep last 10</text>
+
+            <!-- rds -->
+            <line x1="40" y1="391" x2="62" y2="391" stroke="currentColor" stroke-width="1.3"></line>
+            <text x="70" y="396" font-weight="500" fill="currentColor">module.rds</text>
+            <line x1="80" y1="414" x2="80" y2="434" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <line x1="80" y1="414" x2="90" y2="414" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="418" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-mysql · db.t4g.micro · MySQL 8.0 · encrypted</text>
+            <line x1="80" y1="434" x2="90" y2="434" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="438" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-db-subnet-group · petclinic-dev-mysql8 · petclinic/dev/rds-credentials</text>
+
+            <!-- dns -->
+            <line x1="40" y1="467" x2="62" y2="467" stroke="currentColor" stroke-width="1.3"></line>
+            <text x="70" y="472" font-weight="500" fill="currentColor">module.dns</text>
+            <line x1="80" y1="490" x2="80" y2="510" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <line x1="80" y1="490" x2="90" y2="490" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="494" font-size="11" fill="currentColor" opacity="0.8">*.gannet.click — ACM certificate, validated before apply returns</text>
+            <line x1="80" y1="510" x2="90" y2="510" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="514" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev.gannet.click — A alias to the ALB</text>
+
+            <!-- secrets -->
+            <line x1="40" y1="543" x2="62" y2="543" stroke="currentColor" stroke-width="1.3"></line>
+            <text x="70" y="548" font-weight="500" fill="currentColor">module.secrets</text>
+            <line x1="80" y1="566" x2="90" y2="566" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="570" font-size="11" fill="currentColor" opacity="0.8">petclinic/dev/openai-api-key — write-only, never in state</text>
+
+            <!-- github oidc -->
+            <line x1="40" y1="599" x2="62" y2="599" stroke="currentColor" stroke-width="1.3"></line>
+            <text x="70" y="604" font-weight="500" fill="currentColor">module.github_oidc</text>
+            <line x1="80" y1="622" x2="80" y2="642" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <line x1="80" y1="622" x2="90" y2="622" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="626" font-size="11" fill="currentColor" opacity="0.8">GitHub OIDC provider — account-global, created here only</text>
+            <line x1="80" y1="642" x2="90" y2="642" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+            <text x="98" y="646" font-size="11" fill="currentColor" opacity="0.8">petclinic-dev-github-actions-role + its two-statement push policy</text>
+
+          </g>
+        </svg>
+      </div>
+      <figcaption>Everything one <code>terraform apply</code> creates in dev, under its real name. The prod root calls five of these seven — it has no <code>module.dns</code> and no <code>module.github_oidc</code>, so its tree stops after <code>module.secrets</code>.</figcaption>
+    </figure>
+
+    <div class="card">
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Module</th><th>What it owns</th><th>What it creates</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono">vpc</td>
+              <td>The network and the perimeter</td>
+              <td>VPC <code>10.0.0.0/16</code>, two public subnets, an internet gateway, one route table, four security groups and all fourteen of their rules</td>
+            </tr>
+            <tr>
+              <td class="mono">eks</td>
+              <td>The cluster, the nodes, the add-ons, and every role the cluster runs as</td>
+              <td><code>petclinic-{env}</code>, node group <code>petclinic-{env}-nodes</code>, a cluster OIDC provider, five IAM roles, four managed add-ons, one log group</td>
+            </tr>
+            <tr>
+              <td class="mono">ecr</td>
+              <td>One image repository per service</td>
+              <td>Eight repositories named <code>petclinic-{env}/{service}</code>, each with a two-rule lifecycle policy</td>
+            </tr>
+            <tr>
+              <td class="mono">rds</td>
+              <td>MySQL, and the credentials to reach it</td>
+              <td><code>petclinic-{env}-mysql</code>, a DB subnet group, a parameter group, and the secret <code>petclinic/{env}/rds-credentials</code></td>
+            </tr>
+            <tr>
+              <td class="mono">secrets</td>
+              <td>The one secret Terraform writes by hand</td>
+              <td><code>petclinic/{env}/openai-api-key</code></td>
+            </tr>
+            <tr>
+              <td class="mono">dns</td>
+              <td>The certificate and the hostname in front of the ALB</td>
+              <td>A <code>*.gannet.click</code> ACM certificate, its DNS validation records, and the alias record <code>petclinic-dev.gannet.click</code></td>
+            </tr>
+            <tr>
+              <td class="mono">github-oidc</td>
+              <td>The role GitHub Actions assumes</td>
+              <td>The account's OIDC provider (dev only) and <code>petclinic-{env}-github-actions-role</code> with a push-only ECR policy</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Prod calls five of the seven.</strong> There is no <code>module "dns"</code> and no <code>module "github_oidc"</code> in the prod root — prod has no certificate, no hostname, and no CI role of its own. A further two module directories exist and are <em>comment-only stubs</em>: <code>modules/karpenter</code> is reserved for the scaling story, and <code>modules/observability</code> records that the observability stack was deliberately moved in-cluster, so no Terraform resources are planned for it.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>Identity</h3><span class="role">six roles, each trusting exactly one thing</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Role</th><th>Trusted by</th><th>Can do</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono">petclinic-{env}-eks-cluster-role</td>
+              <td class="mono">eks.amazonaws.com</td>
+              <td><code>AmazonEKSClusterPolicy</code> and nothing else</td>
+            </tr>
+            <tr>
+              <td class="mono">petclinic-{env}-eks-node-role</td>
+              <td class="mono">ec2.amazonaws.com</td>
+              <td>Worker node, CNI, and ECR <em>read</em> — the three managed policies a node needs to join and pull</td>
+            </tr>
+            <tr>
+              <td class="mono">petclinic-{env}-ebs-csi-role</td>
+              <td class="mono">kube-system:ebs-csi-controller-sa</td>
+              <td><code>AmazonEBSCSIDriverPolicy</code>, for provisioning volumes</td>
+            </tr>
+            <tr>
+              <td class="mono">petclinic-{env}-lb-controller-role</td>
+              <td class="mono">kube-system:aws-load-balancer-controller</td>
+              <td>The vendored upstream policy for controller v3.6.0 — the widest grant here, and the one exception to the no-wildcards rule, documented in the module</td>
+            </tr>
+            <tr>
+              <td class="mono">petclinic-{env}-eso-role</td>
+              <td class="mono">external-secrets:external-secrets-sa</td>
+              <td><code>GetSecretValue</code> and <code>DescribeSecret</code> on <code>secret:petclinic/{env}/*</code> — no <code>ListSecrets</code>, no <code>kms:Decrypt</code></td>
+            </tr>
+            <tr>
+              <td class="mono">petclinic-{env}-github-actions-role</td>
+              <td class="mono">GitHub OIDC</td>
+              <td>Image upload to the eight repository ARNs. No pull actions, no S3, no DynamoDB, no EKS</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Cluster access is by access entry, not by ConfigMap.</strong> The cluster runs <code>authentication_mode = "API_AND_CONFIG_MAP"</code> with <code>bootstrap_cluster_creator_admin_permissions = false</code>, so the identity that created it holds no implicit rights — an <code>aws_eks_access_entry</code> with <code>AmazonEKSClusterAdminPolicy</code> is what grants admin, and that is what the admin principal ARN list drives. The role that runs the cluster is separate from the role that administers it, which is why a green <code>terraform apply</code> does not by itself mean <code>kubectl</code> will work.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>Where dev and prod genuinely differ</h3><span class="role">the complete delta</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th></th><th>dev</th><th>prod</th></tr></thead>
+          <tbody>
+            <tr><td>Modules wired</td><td class="mono">7</td><td class="mono">5 — no dns, no github-oidc</td></tr>
+            <tr><td>Node type</td><td class="mono">t4g.medium</td><td class="mono">t4g.small</td></tr>
+            <tr><td>ECR tag mutability</td><td class="mono">MUTABLE</td><td class="mono">IMMUTABLE</td></tr>
+            <tr><td>ECR <code>force_delete</code></td><td class="mono">true</td><td class="mono">false</td></tr>
+            <tr><td>RDS backup retention</td><td class="mono">7 days</td><td class="mono">30 days</td></tr>
+            <tr><td>RDS final snapshot</td><td class="mono">skipped</td><td class="mono">taken</td></tr>
+            <tr><td>Secret recovery window</td><td class="mono">0 days</td><td class="mono">7 days</td></tr>
+            <tr><td>EKS API allowlist</td><td class="mono">one workstation /32</td><td class="mono">a different /32</td></tr>
+            <tr><td>ArgoCD sync</td><td class="mono">automatic</td><td class="mono">manual</td></tr>
+            <tr><td>RDS <code>apply_immediately</code></td><td class="mono">true</td><td class="mono">false — the module default</td></tr>
+            <tr><td>Replicas</td><td class="mono">1, HPA off</td><td class="mono">2 — except admin-server at 1</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Most of the dev column is teardown machinery, not preference.</strong> <code>force_delete</code>, the skipped final snapshot, and a zero-day recovery window all exist so that a full destroy and rebuild does not leave a name taken — and <code>apply_immediately</code> exists so a parameter change is visible now rather than at the next maintenance window. The rest is the cost and safety difference the two environments are supposed to have.</p>
+    </div>
+  </section>
+
+  <!-- ===================== CLUSTER LAYER ===================== -->
+
+  <section>
+    <h2 id="cluster">Inside the cluster</h2>
+    <p class="sub">Five namespaces, one generic Helm chart, and eight releases of it. Nothing here is installed by Terraform — the cluster arrives empty apart from its add-ons, and everything below is applied by a script or by ArgoCD.</p>
+
+    <figure>
+      <div class="figscroll">
+        <svg viewBox="0 0 900 660" role="img" width="900" aria-label="Cluster structure: inside the EKS cluster petclinic-dev there are five namespaces. kube-system holds the EKS add-ons and the load balancer controller and EBS CSI driver, both with IRSA roles. external-secrets holds the operator, a ClusterSecretStore and its service account. argocd holds ArgoCD and sixteen Application objects. petclinic-dev holds the eight Deployments, Services and ConfigMaps plus two synced Secrets. petclinic-prod is empty.">
+          <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+
+            <rect x="20" y="20" width="860" height="620" rx="10" fill="none" stroke="var(--accent)" stroke-width="1.6"></rect>
+            <text x="42" y="48" font-weight="500" fill="var(--accent)">EKS cluster · petclinic-dev</text>
+            <text x="42" y="66" font-size="11" fill="currentColor" opacity="0.62">Kubernetes 1.36 · 2 × t4g.medium · access by access entry, not the aws-auth ConfigMap</text>
+
+            <!-- kube-system -->
+            <rect x="50" y="86" width="800" height="90" rx="7" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+            <text x="68" y="108" font-weight="500" fill="currentColor">kube-system</text>
+            <text x="68" y="130" font-size="11" fill="currentColor" opacity="0.72">EKS add-ons: coredns · kube-proxy · vpc-cni · ebs-csi-driver</text>
+            <text x="68" y="149" font-size="11" fill="currentColor" opacity="0.72">aws-load-balancer-controller — Helm chart 3.6.0</text>
+            <text x="68" y="168" font-size="11" fill="currentColor" opacity="0.55">IRSA → petclinic-dev-lb-controller-role · petclinic-dev-ebs-csi-role</text>
+
+            <!-- external-secrets -->
+            <rect x="50" y="188" width="800" height="76" rx="7" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+            <text x="68" y="210" font-weight="500" fill="currentColor">external-secrets</text>
+            <text x="68" y="232" font-size="11" fill="currentColor" opacity="0.72">External Secrets Operator · ClusterSecretStore aws-secrets-manager</text>
+            <text x="68" y="251" font-size="11" fill="currentColor" opacity="0.55">ServiceAccount external-secrets-sa · IRSA → petclinic-dev-eso-role</text>
+
+            <!-- argocd -->
+            <rect x="50" y="276" width="800" height="76" rx="7" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+            <text x="68" y="298" font-weight="500" fill="currentColor">argocd</text>
+            <text x="68" y="320" font-size="11" fill="currentColor" opacity="0.72">server · repo-server · application-controller</text>
+            <text x="68" y="339" font-size="11" fill="currentColor" opacity="0.55">16 Application objects — 8 dev, 8 prod. The only writer on a normal day.</text>
+
+            <!-- petclinic-dev -->
+            <rect x="50" y="364" width="800" height="160" rx="7" fill="none" stroke="var(--accent)" stroke-width="1.6"></rect>
+            <text x="68" y="386" font-weight="500" fill="var(--accent)">petclinic-dev</text>
+            <text x="68" y="408" font-size="11" fill="currentColor" opacity="0.72">8 Deployments · 8 Services · 8 ConfigMaps · 8 ServiceAccounts</text>
+            <text x="68" y="429" font-size="11" fill="currentColor" opacity="0.72">Secret rds-credentials ← petclinic/dev/rds-credentials</text>
+            <text x="68" y="448" font-size="11" fill="currentColor" opacity="0.72">Secret openai-api-key ← petclinic/dev/openai-api-key</text>
+            <text x="68" y="471" font-size="11" fill="currentColor" opacity="0.55">startup order by init container: config-server → discovery-server → the other six</text>
+            <text x="68" y="490" font-size="11" fill="currentColor" opacity="0.55">Pod Security: baseline enforced · restricted warned and audited</text>
+            <text x="68" y="512" font-size="11" fill="currentColor" opacity="0.55">no Ingress object here — the ALB's Ingress lives outside the chart</text>
+
+            <!-- petclinic-prod -->
+            <rect x="50" y="536" width="800" height="76" rx="7" fill="none" stroke="var(--warn)" stroke-width="1.6" stroke-dasharray="5 3"></rect>
+            <text x="68" y="558" font-weight="500" fill="var(--warn)">petclinic-prod</text>
+            <text x="68" y="580" font-size="11" fill="currentColor" opacity="0.72">empty — the eight Applications exist, nothing has ever been synced</text>
+            <text x="68" y="599" font-size="11" fill="currentColor" opacity="0.55">no Ingress rendered · no petclinic-prod ECR repositories exist</text>
+
+          </g>
+        </svg>
+      </div>
+      <figcaption>The two solid-bordered boxes are the ones ArgoCD touches; the dashed one is declared but never synced. Note that <code>argocd</code> and <code>kube-system</code> are not in <code>k8s/base/namespaces.yaml</code> — they come from the install manifests, which is why applying those without an explicit <code>-n</code> sends them to <code>default</code>.</figcaption>
+    </figure>
+
+    <div class="card">
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Namespace</th><th>Holds</th><th>Installed by</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">kube-system</td><td>The AWS Load Balancer Controller and the EBS CSI driver</td><td class="mono">scripts/install-lb-controller.sh</td></tr>
+            <tr><td class="mono">external-secrets</td><td>The External Secrets Operator and the service account it runs as</td><td class="mono">scripts/install-eso.sh</td></tr>
+            <tr><td class="mono">argocd</td><td>ArgoCD itself, and all sixteen Application objects</td><td class="mono">kubectl apply -n argocd -f k8s/argocd/install/</td></tr>
+            <tr><td class="mono">petclinic-dev</td><td>The eight service Deployments, their Services, ConfigMaps and the two synced Secrets</td><td class="mono">ArgoCD</td></tr>
+            <tr><td class="mono">petclinic-prod</td><td>Empty. The Applications exist; nothing has ever been synced.</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Both workload namespaces enforce the <code>baseline</code> Pod Security Standard</strong>, and warn and audit at <code>restricted</code> — identical in dev and prod on purpose, so a manifest that would be rejected in prod is rejected in dev first. The <code>argocd</code> namespace is not in <code>k8s/base/namespaces.yaml</code>; it comes from the vendored install manifest, and <strong>none of that manifest's 59 documents sets <code>metadata.namespace</code></strong> — an apply without <code>-n argocd</code> lands the whole install in <code>default</code> and reports success.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>The eight services</h3><span class="role">one chart, eight value files</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Service</th><th>Port</th><th>Waits for</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">config-server</td><td class="mono">8888</td><td>nothing</td><td>First in the chain, so it has no init containers — one here would be waiting on itself. Serves config from a public Git repo.</td></tr>
+            <tr><td class="mono">discovery-server</td><td class="mono">8761</td><td class="mono">config-server</td><td>Eureka registry.</td></tr>
+            <tr><td class="mono">api-gateway</td><td class="mono">8080</td><td class="mono">config-server, discovery-server</td><td>Every request enters here. The one service with a raised CPU request, because its HPA scales against that request.</td></tr>
+            <tr><td class="mono">customers-service</td><td class="mono">8081</td><td class="mono">config-server, discovery-server</td><td>Owners and pets. Reads RDS.</td></tr>
+            <tr><td class="mono">visits-service</td><td class="mono">8082</td><td class="mono">config-server, discovery-server</td><td>Visit records. Reads RDS.</td></tr>
+            <tr><td class="mono">vets-service</td><td class="mono">8083</td><td class="mono">config-server, discovery-server</td><td>Vet data, with a Caffeine cache in front. Reads RDS — the third MySQL service, and the one whose profile list is <code>docker,mysql,production</code> rather than just <code>docker,mysql</code>.</td></tr>
+            <tr><td class="mono">genai-service</td><td class="mono">8084</td><td class="mono">config-server, discovery-server</td><td>The only service that reads the OpenAI key from the synced Secret.</td></tr>
+            <tr><td class="mono">admin-server</td><td class="mono">9090</td><td class="mono">config-server, discovery-server</td><td>Spring Boot Admin dashboard.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Startup order is enforced by init containers, not by ArgoCD sync waves</strong> — no <code>sync-wave</code> annotation exists anywhere in the repo. Each waiter is a <code>busybox</code> container looping on <code>wget</code> against the upstream service's actuator health endpoint, so the order is a property of the values files rather than of the deploy tool.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>The chart</h3><span class="role">helm/petclinic-service — one release per service</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Template</th><th>Renders</th><th>Only when</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">deployment.yaml</td><td>The Deployment</td><td>always — but <code>replicas</code> is omitted entirely when autoscaling is on, so the HPA owns the count</td></tr>
+            <tr><td class="mono">service.yaml</td><td>A ClusterIP Service</td><td>always</td></tr>
+            <tr><td class="mono">configmap.yaml</td><td>A ConfigMap, consumed via <code>envFrom</code></td><td class="mono">configMap.enabled</td></tr>
+            <tr><td class="mono">serviceaccount.yaml</td><td>A ServiceAccount</td><td class="mono">serviceAccount.create</td></tr>
+            <tr><td class="mono">hpa.yaml</td><td>An <code>autoscaling/v2</code> HPA on CPU</td><td class="mono">autoscaling.enabled</td></tr>
+            <tr><td class="mono">pdb.yaml</td><td>A <code>policy/v1</code> PodDisruptionBudget</td><td class="mono">podDisruptionBudget.enabled</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>The release name <em>is</em> the object name.</strong> The chart's <code>fullname</code> helper returns the release name rather than the usual <code>chart-release</code> concatenation, which is why ArgoCD sets <code>releaseName: vets-service</code> with no environment suffix and why the values files set <code>fullnameOverride</code> — the environment lives in the destination namespace, not in the object name. Two guards are worth knowing: the pod template carries a <code>checksum/config</code> annotation so a ConfigMap change restarts the pods, and <code>configmap.yaml</code> fails the render outright if a service asks for <code>SPRING_DATASOURCE_URL</code> while the environment overlay left <code>database.connectionString</code> empty — which is what catches a service file rendered against the wrong overlay.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>What every container gets</h3><span class="role">the defaults a service file inherits</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th></th><th>Value</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>Probes</td><td class="mono">startup /actuator/health · readiness …/readiness · liveness …/liveness</td><td>The startup probe allows 30 × 10s — five minutes — which is the grace period for a JVM; every <code>initialDelaySeconds</code> is 0 because the startup probe covers it.</td></tr>
+            <tr><td>Resources</td><td class="mono">requests 100m / 128Mi · limits 500m / 512Mi</td><td>Matches the spec. A JVM holds roughly 350 MiB resident, so the request is deliberately below the real footprint and the limit is what caps it.</td></tr>
+            <tr><td>Security context</td><td class="mono">runAsNonRoot, uid 1000, seccomp RuntimeDefault, all capabilities dropped</td><td>The pod-level half of the <code>restricted</code> standard the namespace audits against.</td></tr>
+            <tr><td>Writable root FS</td><td class="mono">readOnlyRootFilesystem: false</td><td>Deliberate, and the one place the chart does not tighten: Spring Boot writes to <code>/tmp</code> at startup.</td></tr>
+            <tr><td>Spread</td><td class="mono">topologySpreadConstraints on kubernetes.io/hostname</td><td><code>ScheduleAnyway</code>, so two replicas prefer different nodes but a single-node cluster still schedules.</td></tr>
+            <tr><td>Rollout</td><td class="mono">maxUnavailable: 0, maxSurge: 1</td><td>A rolling update never takes capacity below the current count.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>One service overrides its probe paths.</strong> Config Server's own <code>/{application}/{profile}</code> controller matches any two- or three-segment path, so <code>/actuator/health/readiness</code> is answered as a config lookup for an application called <code>actuator</code> and returns 404. Its readiness and liveness paths are both set to <code>/actuator/health</code> — which, as the values file notes, means they prove the HTTP server answers rather than that the service is healthy.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>Secrets reaching pods</h3><span class="role">External Secrets Operator · two objects, both dev</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>ExternalSecret</th><th>AWS secret</th><th>Becomes</th><th>Shape</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono">rds-credentials</td>
+              <td class="mono">petclinic/dev/rds-credentials</td>
+              <td class="mono">Secret rds-credentials</td>
+              <td>Two keys, <code>username</code> and <code>password</code>, read out of a JSON blob with <code>remoteRef.property</code>.</td>
+            </tr>
+            <tr>
+              <td class="mono">openai-api-key</td>
+              <td class="mono">petclinic/dev/openai-api-key</td>
+              <td class="mono">Secret openai-api-key</td>
+              <td>One key, <code>OPENAI_API_KEY</code>, read with <strong>no</strong> <code>property</code> — the remote value is plaintext, not JSON.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>The two differ structurally, and getting it wrong fails quietly in one direction.</strong> Adding a <code>property</code> to the OpenAI secret fails at sync because the value is not JSON. Removing it from the RDS secret does not fail — it copies the whole <code>{"username":…,"password":…}</code> blob into both keys. Both objects refresh hourly and sit behind one <code>ClusterSecretStore</code> named <code>aws-secrets-manager</code>, which is scoped by a namespace regex to exactly <code>petclinic-dev</code> and <code>petclinic-prod</code> — a Secret in any other namespace cannot be resolved through it. Authentication is IRSA, so no AWS credential exists anywhere in the cluster.</p>
+    </div>
+  </section>
+
+  <!-- ===================== ARGOCD LAYER ===================== -->
+
+  <section>
+    <h2 id="argocd">The ArgoCD layer</h2>
+    <p class="sub">Sixteen Applications — one per service per environment — all pointing at the same chart. This is the only component that writes to the cluster on a normal day.</p>
+
+    <div class="card">
+      <div class="card-head"><h3>One Application, annotated</h3><span class="role">k8s/argocd/applications/dev/vets-service.yaml</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">metadata.name</td><td class="mono">vets-service-dev</td></tr>
+            <tr><td class="mono">metadata.namespace</td><td class="mono">argocd</td></tr>
+            <tr><td class="mono">spec.source.repoURL</td><td class="mono">https://github.com/truongnvnse/petclinic-platform.git</td></tr>
+            <tr><td class="mono">spec.source.targetRevision</td><td class="mono">main</td></tr>
+            <tr><td class="mono">spec.source.path</td><td class="mono">helm/petclinic-service</td></tr>
+            <tr><td class="mono">spec.source.helm.releaseName</td><td class="mono">vets-service</td></tr>
+            <tr><td class="mono">spec.source.helm.valueFiles</td><td class="mono">../../helm-values/vets-service.yaml<br>../../helm-values/dev.yaml</td></tr>
+            <tr><td class="mono">spec.destination.namespace</td><td class="mono">petclinic-dev</td></tr>
+            <tr><td class="mono">spec.syncPolicy.syncOptions</td><td class="mono">CreateNamespace=true, PruneLast=true, ApplyOutOfSyncOnly=true</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>The value-file order is the merge order</strong> — service file first, environment overlay second, so the overlay wins on anything both set. That is what lets <code>dev.yaml</code> turn a service's HPA off without editing the service file. It is also why <code>dev.yaml</code> cannot set <code>replicaCount</code>: as the last layer it would beat every per-service value, including the <code>replicaCount: 1</code> that <code>admin-server</code> needs in prod. <code>ApplyOutOfSyncOnly</code> keeps a sync from re-applying sixteen unchanged objects on every commit.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>dev and prod differ by one absent key</h3><span class="role">the sync policy</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th></th><th>dev</th><th>prod</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">syncPolicy.automated</td><td class="mono">prune: true · selfHeal: true</td><td class="mono">— absent —</td></tr>
+            <tr><td>Behaviour</td><td>A commit deploys itself. Drift is reverted within minutes.</td><td>The Application sits <code>OutOfSync</code> until a human runs <code>argocd app sync</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>The omission is the policy.</strong> Writing an empty <code>automated: {}</code> would turn auto-sync <em>on</em> — the key's presence is what enables it, so prod's eight files simply do not have it. This is worth knowing because it is invisible: a diff between the dev and prod Application files looks like a missing field rather than a deliberate gate.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>Two locks on the same door</h3><span class="role">k8s/argocd/argocd-rbac-cm.yaml</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Layer</th><th>What it stops</th></tr></thead>
+          <tbody>
+            <tr><td>The absent <code>automated</code> key</td><td>ArgoCD syncing prod on its own.</td></tr>
+            <tr><td><code>role:developer</code></td><td>A human syncing prod by accident: the role's only write grant is <code>applications, sync, default/*-dev</code>, so a prod Application matches nothing. Every other rule is <code>get</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Both bindings are inert today</strong> — they name a local <code>developer</code> account that has not been created and an SSO group that is not configured, so the RBAC file is a specification waiting for a second operator. Its own header carries the operational trap: re-applying <code>install.yaml</code> afterwards wipes this ConfigMap's data through the three-way merge, silently reverting every rule to ArgoCD's defaults. Re-apply this file after any install.</p>
+    </div>
+  </section>
+
+  <!-- ===================== GITHUB LAYER ===================== -->
+
+  <section>
+    <h2 id="github">The GitHub layer</h2>
+    <p class="sub">Two repositories with two different jobs. Only one of them ever calls an AWS API, and the OIDC trust policy names that one.</p>
+
+    <div class="card">
+      <div class="card-head"><h3>spring-petclinic-microservices</h3><span class="role">the application — read-only from this repo</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Workflow</th><th>Trigger</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono">build-push.yml</td>
+              <td>push to <code>main</code></td>
+              <td>Detects changed services, builds them as arm64, scans, pushes to ECR, then dispatches at this repo. Assumes the AWS role — the only workflow that does.</td>
+            </tr>
+            <tr>
+              <td class="mono">build-image.yml</td>
+              <td><code>workflow_call</code></td>
+              <td>The reusable per-service build: Maven package, QEMU + buildx, the two Trivy scans, the push. Called once per selected service.</td>
+            </tr>
+            <tr>
+              <td class="mono">maven-build.yml</td>
+              <td>push + PR to <code>main</code></td>
+              <td>The full eight-module test suite. No AWS access, no images.</td>
+            </tr>
+            <tr>
+              <td class="mono">check-pr-template.yml</td>
+              <td>PR opened/edited · nightly</td>
+              <td>Housekeeping on the PR description. Unrelated to deployment.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Reusable workflows must sit at the top level of <code>.github/workflows/</code></strong> — GitHub does not support subdirectories, and the only symptom is a red X on the <code>uses:</code> line after a push. <code>actionlint</code> exits 0 on a subdirectory reference <em>and</em> on a file that does not exist.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>petclinic-platform</h3><span class="role">this repo — infrastructure and the deployment signal</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Workflow</th><th>Trigger</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono">update-image-tags.yml</td>
+              <td><code>repository_dispatch</code></td>
+              <td>Validates the payload, writes the new tag into <code>helm-values/</code>, commits and pushes. <strong>Assumes no AWS role and runs no AWS command.</strong></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Concurrency is deliberately non-cancelling here</strong> — two dispatches arriving together queue rather than race, because both SHAs are real builds and dropping the earlier one would leave the values files pointing at an older image than the newest successful build.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>OIDC federation</h3><span class="role">how CI reaches AWS without a stored key</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td>Provider</td><td class="mono">token.actions.githubusercontent.com</td></tr>
+            <tr><td>Audience</td><td class="mono">sts.amazonaws.com</td></tr>
+            <tr><td>Subject</td><td class="mono">repo:truongnvnse@336541468/spring-petclinic-microservices@1400042382:ref:refs/heads/main</td></tr>
+            <tr><td>Role</td><td class="mono">petclinic-dev-github-actions-role · max session 1 hour</td></tr>
+            <tr><td>Policy</td><td>Two statements: <code>ecr:GetAuthorizationToken</code> on <code>*</code>, and the five layer-upload and image-push actions on the eight repository ARNs. No pull, no S3, no DynamoDB.</td></tr>
+            <tr><td>Module</td><td class="mono">terraform/modules/github-oidc/</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>The subject names the app repo, not this one</strong> — that is the point rather than a mix-up. Two workflows exist and only one calls an AWS API; scoping the trust policy here would grant the role to the workflow that never uses it and withhold it from the one that does. <strong>It also carries the numeric owner and repository IDs</strong>, and it pins the branch rather than allowing any ref — GitHub's immutable subject claim includes the IDs, so a policy written from the names alone matches nothing at all, and a <code>pull_request</code> subject would match every fork. The single unavoidable wildcard is <code>ecr:GetAuthorizationToken</code>, which the ECR API refuses to scope to a repository.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>Secrets and variables</h3><span class="role">set on the app repo</span></div>
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>Name</th><th>Kind</th><th>Used by</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">AWS_ROLE_ARN</td><td>secret</td><td>the build job only</td><td>the OIDC role ARN</td></tr>
+            <tr><td class="mono">PLATFORM_REPO_TOKEN</td><td>secret</td><td>the dispatch job only</td><td>a PAT that can fire a dispatch at this repo</td></tr>
+            <tr><td class="mono">AWS_REGION</td><td>variable</td><td>build</td><td class="mono">eu-central-1</td></tr>
+            <tr><td class="mono">AWS_ACCOUNT_ID</td><td>variable</td><td>build</td><td class="mono">550798137608</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Region and account ID are variables, not secrets</strong> — GitHub masks secret values as <code>***</code> everywhere they appear in a log, which would censor the very messages that diagnose a federation failure. The build job is passed one named secret rather than <code>secrets: inherit</code>, so it never holds <code>PLATFORM_REPO_TOKEN</code>.</p>
+    </div>
+  </section>
+
+  <!-- ===================== WHERE VALUES LIVE ===================== -->
+
+  <section>
+    <h2 id="values">Where a value lives</h2>
+    <p class="sub">The map to reach for when something needs changing. Most of these are one-line edits; the two that are generated are called out.</p>
+
+    <div class="card">
+      <div class="tblscroll">
+        <table>
+          <thead><tr><th>To change…</th><th>Edit</th><th>Then</th></tr></thead>
+          <tbody>
+            <tr><td>Anything about the network, nodes, database, DNS or secrets</td><td class="mono">terraform/environments/{env}/main.tf</td><td class="mono">plan → apply</td></tr>
+            <tr><td>Workstation IP allowed to reach the EKS API</td><td class="mono">terraform/environments/{env}/terraform.tfvars</td><td class="mono">plan → apply</td></tr>
+            <tr><td>A service's replicas, HPA or PDB</td><td class="mono">helm-values/{service}.yaml</td><td>commit — ArgoCD syncs</td></tr>
+            <tr><td>Turning those off for one environment</td><td class="mono">helm-values/{env}.yaml</td><td>commit — ArgoCD syncs</td></tr>
+            <tr><td>A service's port, env vars or init containers</td><td class="mono">helm-values/{service}.yaml</td><td>commit — ArgoCD syncs</td></tr>
+            <tr><td>The image a service runs</td><td class="mono">helm-values/{service}.yaml → image.tag</td><td>normally CI does this; see <code>docs/rollback-runbook.md</code></td></tr>
+            <tr><td>What the chart renders for every service</td><td class="mono">helm/petclinic-service/templates/</td><td><span class="mono">helm template</span>, then commit</td></tr>
+            <tr><td>The Ingress — host, annotations, health check</td><td class="mono">k8s/base/ingress/ingress.yaml.tpl</td><td class="mono">./scripts/render-ingress.sh --env {env}</td></tr>
+            <tr><td>Which AWS secret maps to which k8s Secret</td><td class="mono">k8s/base/external-secrets/</td><td class="mono">kubectl apply</td></tr>
+            <tr><td>What each ArgoCD Application deploys and where</td><td class="mono">k8s/argocd/applications/{env}/{service}.yaml</td><td class="mono">kubectl apply</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Two of these are generated, not committed.</strong> <code>k8s/base/ingress/ingress.yaml</code> is rendered from the <code>.tpl</code> and is gitignored; <code>helm-values/{service}.yaml → image.tag</code> is normally written by CI. Editing either by hand works, but the next run of the thing that owns it will overwrite the change.</p>
+    </div>
+  </section>
+
+  <!-- ===================== THINGS TO KNOW ===================== -->
+
+  <section>
+    <h2 id="surprises">Things that will surprise you</h2>
+    <p class="sub">Each of these has bitten someone, or would. They are the parts of the design that are not visible from a file listing.</p>
+
+    <ul class="checks">
+      <li><span class="mark flag">!</span><span><strong>Dev owns the account-global OIDC provider.</strong> An AWS account may hold only one provider per URL, so this per-environment module creates a resource that is not per-environment. Destroying dev removes it, and a future prod pipeline would stop being able to assume its role until dev is re-applied. Prod has no <code>github_oidc</code> module at all today — adding one means <code>create_oidc_provider = false</code> plus dev's provider ARN passed in, not flipping a flag on an existing call.</span></li>
+
+      <li><span class="mark flag">!</span><span><strong>The ALB is not in Terraform state.</strong> It is created by the AWS Load Balancer Controller in response to the Ingress, so <code>terraform destroy</code> does not know it exists — and EKS teardown fails with five <code>DependencyViolation</code> errors at once (two subnets, the certificate, the security group, the gateway). Those five errors are one orphaned ALB. Delete the Ingress first and wait for it to go.</span></li>
+
+      <li><span class="mark flag">!</span><span><strong>The Ingress is a template, and a stale one applies cleanly.</strong> <code>ingress.yaml.tpl</code> holds <code>&lt;ACM_CERTIFICATE_ARN&gt;</code> and <code>&lt;ALB_SECURITY_GROUP_ID&gt;</code>; both are regenerated on every rebuild. A rendered file holding last rebuild's values is still valid YAML, so <code>kubectl apply</code> succeeds and the failure only surfaces later as a controller reconcile error.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>Dev runs <code>t4g.medium</code>, not the spec's <code>t4g.small</code>.</strong> This is a measured correction, not a preference. <code>t4g.small</code> allows 11 pods per node, so two nodes give 22 slots against 23 needed once the system pods are counted — the eighth service sat <code>Pending</code>. It also reports 1365 MiB allocatable, and a Spring Boot service holds ~350 MiB resident against a 128Mi request, so the scheduler packed four JVMs onto one node and the kubelet stopped posting status. Prod is still on <code>t4g.small</code> and will need the same fix before its first deploy.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>Most dispatches write fewer than eight files.</strong> The build only builds changed services, so the payload names a subset and <code>update-image-tags.yml</code> writes only that subset. A commit touching one values file is the normal case, not a bug — and it is what keeps <code>helm-values/</code> and ECR in agreement.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>ArgoCD <code>Synced</code> does not mean healthy.</strong> <code>status.sync</code> means the cluster matches Git; <code>status.health</code> means the pods actually run. A revision can be synced and degraded at the same time — that is what an <code>ImagePullBackOff</code> looks like in the ArgoCD UI.</span></li>
+
+      <li><span class="mark flag">!</span><span><strong>Prod is a specification, not a running environment.</strong> Five things are missing before its first sync can succeed, and each fails differently. The prod Applications have never been applied. <code>helm-values/prod.yaml</code> still holds a deliberately unresolvable RDS hostname (<code>REPLACE-ME-prod-rds-endpoint…</code>), so the pods would die on <code>UnknownHostException</code>. The <code>petclinic-prod</code> ECR repositories have never been created — <code>terraform/environments/prod/</code> has not been applied. No prod Ingress exists — the template has only ever been rendered for dev. And <strong>both ExternalSecrets hardcode <code>namespace: petclinic-dev</code></strong>, so installing them into <code>petclinic-prod</code> would leave <code>SPRING_DATASOURCE_PASSWORD</code> and <code>OPENAI_API_KEY</code> pointing at Secrets that do not exist there — <code>CreateContainerConfigError</code> on every pod, from a file that looks correct.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>Dev is destroyed and rebuilt on a cycle.</strong> That makes an empty state and a full-create plan the normal case rather than a lost state file. Three settings exist only to survive that: <code>force_delete</code> on the ECR repositories, <code>skip_final_snapshot</code> on RDS, and <code>secret_recovery_window_in_days = 0</code> on both Secrets Manager and RDS — a 30-day recovery window would block re-creating the same secret name on the next rebuild.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>Only <code>aws</code> and <code>random</code> providers are used.</strong> Terraform never talks to the Kubernetes API, so a teardown never needs cluster access — and <code>kubectl</code> failing does not mean Terraform will.</span></li>
+    </ul>
+  </section>
+
+  <!-- ===================== SCOPE ===================== -->
+
+  <section>
+    <h2 id="not-covered">What this document does not cover</h2>
+    <p class="sub">Everything above is real. This section is the boundary of the drawing — the things a reader could reasonably assume exist because a platform usually has them, and that this one does not have yet. Read it before concluding something is missing from the page rather than from the repo.</p>
+
+    <ul class="checks">
+      <li><span class="mark flag">!</span><span><strong>There is no observability at all.</strong> No CloudWatch alarms, dashboards or SNS topics; no Prometheus, Grafana, Loki, FluentBit or Zipkin; no cost budget. The only monitoring resource in the entire repository is a single CloudWatch log group for the EKS control plane (<code>terraform/modules/eks/main.tf</code>). <code>terraform/modules/observability/</code> exists but is a deliberately empty placeholder — its own header says the stack is meant to run in-cluster rather than as Terraform resources, and none of it has been installed. An alarm that never fires and a page that never arrives look identical to a healthy system.</span></li>
+
+      <li><span class="mark flag">!</span><span><strong>The HPA cannot scale, and does not say so.</strong> The chart renders <code>hpa.yaml</code> and the values files configure it, but the cluster has no Metrics Server — the four managed add-ons are <code>coredns</code>, <code>kube-proxy</code>, <code>vpc-cni</code> and <code>aws-ebs-csi-driver</code>. An HPA in that state reports <code>&lt;unknown&gt;/70%</code> and never scales; it does not error. <code>hpa.yaml</code> says this in its own header (PETPLAT-72). Dev is unaffected in practice because <code>dev.yaml</code> turns autoscaling off — but prod is configured to scale and will not.</span></li>
+
+      <li><span class="mark flag">!</span><span><strong>Nothing tells a human that prod is waiting.</strong> The ArgoCD notifications controller is deployed, but its ConfigMap has no <code>data</code> — no triggers, no subscriptions, no notifier. There is no Slack, email or webhook integration anywhere in the repo. A prod Application sits <code>OutOfSync</code> until somebody opens the ArgoCD UI and looks.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>There is no <code>ResourceQuota</code> and no <code>LimitRange</code>.</strong> The chart renders six kinds and neither of these is one of them; the only mentions in the repo are unimplemented backlog stories. Per-container requests and limits are set, so the scheduler behaves, but nothing caps what a namespace can consume in total.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>There is no <code>ApplicationSet</code>.</strong> The sixteen Application objects are sixteen hand-written files. The ApplicationSet controller ships with the ArgoCD install and is running unused. Adding a ninth service means writing two more files by hand, not editing a generator.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>The state bucket and lock table are not in Terraform.</strong> <code>petclinic-terraform-state-550798137608</code> and <code>petclinic-terraform-locks</code> appear in the architecture figure as supporting services, but nothing in <code>terraform/</code> creates them — they cannot be, since Terraform needs them to run. <code>scripts/bootstrap-state.sh</code> creates both, with versioning, SSE, a public-access block and an HTTPS-only bucket policy. It is the only script in <code>scripts/</code> that provisions AWS resources, and it runs once per account.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>There is a cheaper alternative to destroying dev.</strong> <code>scripts/stop-env.sh</code> scales the node group to zero and stops RDS, leaving the control plane up; <code>start-env.sh</code> reverses it. This page describes the destroy-and-rebuild cycle because that is what the state usually reflects — but a plain <code>terraform apply</code> silently undoes a stop, because Terraform still declares min 2 / desired 2 and will put the nodes back.</span></li>
+
+      <li><span class="mark info">i</span><span><strong>This page describes infrastructure, not the tooling around it.</strong> The <code>.claude/</code> directory (hooks, path-scoped rules, review subagents, skills), most of <code>scripts/</code> beyond the ones named inline, and <code>docs/jira-backlog.md</code> are all real and all outside the scope of this document. The Jira backlog in particular is where the work behind the gaps above is tracked.</span></li>
+    </ul>
+  </section>
+
+  <footer style="border-top: 1px solid var(--border); padding-top: 18px; color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 18px;">
+    <span class="mono">Last updated: 2026-10-13</span>
+    <span>Companion to <code>docs/vpc-topology.html</code> (network detail), <code>docs/technical-spec.md</code> (the values) and <code>docs/ci-operations.md</code> (the pipeline in depth).</span>
+  </footer>
+
+</div>
+
+<script>
+  (function () {
+    var buttons = Array.prototype.slice.call(document.querySelectorAll('.toggle button'));
+    var nodes = Array.prototype.slice.call(document.querySelectorAll('[data-dev][data-prod]'));
+
+    function apply(env) {
+      nodes.forEach(function (el) {
+        var next = el.getAttribute('data-' + env);
+        if (next !== null && el.textContent !== next) el.textContent = next;
+      });
+      buttons.forEach(function (b) {
+        b.setAttribute('aria-pressed', String(b.getAttribute('data-env') === env));
+      });
+      try { localStorage.setItem('petclinic-infra-env', env); } catch (e) {}
+    }
+
+    buttons.forEach(function (b) {
+      b.addEventListener('click', function () { apply(b.getAttribute('data-env')); });
+    });
+
+    var saved = null;
+    try { saved = localStorage.getItem('petclinic-infra-env'); } catch (e) {}
+    apply(saved === 'prod' ? 'prod' : 'dev');
+  })();
+</script>

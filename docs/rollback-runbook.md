@@ -1,16 +1,16 @@
 # Rollback Runbook
 
-**Last Updated:** 2026-10-11
+**Last Updated:** 2026-10-12
 **Purpose:** Recover a petclinic service from a bad deployment. CD is ArgoCD, so the durable rollback is always a Git change — the other two methods exist for the window before Git is fixed.
 **Applies to:** `dev` and `prod`. Each procedure says where the two differ.
 
-> **Not yet verified, and not yet runnable.** Three things are missing, and each one blocks a different part of this document:
+> **Partly verified.** The pipeline and the controller now exist, so the commands below have something to talk to. A *rollback* has still not been rehearsed, and prod is still unapplied.
 >
-> - **ArgoCD is not installed** — E-17 (PETPLAT-112…114). `k8s/argocd/` does not exist, so every `argocd` command below has nothing to talk to.
-> - **The pipeline that produces image tags has never run.** `update-image-tags.yml` exists in this repo, but the workflow that fires it — `build-push.yml` in the app repo — is PETPLAT-49's deliverable and does not exist. No tag commit has ever been made by CI, so no tag has ever been reverted either.
+> - **ArgoCD is installed** — 2026-10-12, v3.5.5, with the eight dev Applications `Synced` and `Healthy`. The `argocd` commands below are runnable.
+> - **The tag pipeline has run.** Two tag commits exist (`1a74dfa`, `5042f36`), so the commits this runbook reverts are real ones. No tag has been reverted by CI yet, so "Procedure: rollback by reverting the image tag" is still unexercised. "Rollback when the tag is not in ECR" **has** been performed once, by hand, on 2026-10-12, for seven services — that procedure reflects what was actually done.
 > - **Prod has been planned but never applied.** `terraform/environments/prod/plan.out` exists; there is no apply log beside it, and no prod cluster. Every prod branch below is unrunnable today.
 >
-> Every command is therefore written against the documented behaviour of the tools, not against a rollback that has actually been performed. PETPLAT-54's acceptance criterion "rollback tested" is **not** satisfied by this document alone — run "Procedure: rehearse a rollback" on dev once E-17 lands, before relying on any of it.
+> PETPLAT-54's acceptance criterion "rollback tested" is **not** satisfied by this document alone — run "Procedure: rehearse a rollback" on dev before relying on the untested branches.
 
 ## Table of Contents
 
@@ -264,11 +264,40 @@ Treat it as an outage in progress rather than a failed deploy, and do not wait f
      --image-ids imageTag=<tag>
    ```
 
-3. The likely cause is the assumption flagged in `.github/workflows/update-image-tags.yml`: that workflow writes the new SHA into **all eight** values files, which is only correct if `build-push.yml` pushed all eight images at that SHA. If the build only pushes the services whose directories changed, the others point at tags that do not exist. The workflow logs a `::warning::` annotation when the dispatch payload names a subset — check the failed-or-warned run before assuming anything else.
+3. **If it is missing, check what ECR holds under other names before concluding nothing was pushed.** `update-image-tags.yml` writes only the services named in the dispatch payload, and `build-push.yml` dispatches only after its build job ran, so a values file pointing at a tag the build never pushed should no longer be reachable through the pipeline. That leaves three causes, in the order worth checking:
 
-   The fix is to revert the tag update ([rollback by reverting the image tag](#procedure-rollback-by-reverting-the-image-tag)) so the unaffected services go back to a tag that exists, and then either change the build to push all eight or change the workflow to update only the services named in the dispatch payload.
+   - **The repository was repopulated under a different tag name.** A `terraform destroy`/apply cycle empties the ECR repositories. A later manual push whose `--tag` differs from the default commit SHA leaves ECR holding a name no values file mentions, while the values files keep pointing at the old SHA. **This is what happened on 2026-10-12**: ECR held `v1.0.0` and `helm-values/*.yaml` said `48d7745`, for seven of the eight services. Compare the tag in the file against what ECR has:
+     ```bash
+     aws ecr describe-images --region eu-central-1 \
+       --repository-name petclinic-{env}/{service} \
+       --output json | jq -r '.[] | .imageDetails[] | (.imageTags // ["<untagged>"])[]'
+     ```
+   - **The build pushed part of what it selected.** The dispatch fires after the whole matrix, so this needs a cancelled or partially failed matrix — check the app repo's run list for a red or cancelled run at that SHA before assuming the tag was never pushed at all.
+   - **A hand-pushed image.** Step 4.
 
-4. If the tag *should* exist, re-run the build in the app repo rather than hand-pushing an image. A hand-pushed image is not reproducible from the commit and breaks the property that the tag identifies what was built.
+4. Decide between retagging and rebuilding — they are not interchangeable.
+
+   **If the image exists under another tag**, retagging is the cheap fix and is sound *only* once you have proved the image really was built from the commit in question. Do not settle for push timestamps; the image records its own commit:
+   ```bash
+   docker run --rm --entrypoint sh <ecr-repo>:<existing-tag> \
+     -c 'cat /application/BOOT-INF/classes/git.properties'
+   ```
+   The app's `pom.xml` runs `git-commit-id-maven-plugin`, so every image carries `git.commit.id.abbrev` and `git.dirty`. The tag is sound when `git.commit.id.abbrev` matches the SHA in the values file and `git.dirty=false` — the second is the part timestamps cannot give you, because it rules out an image built from an unclean tree. Then retag:
+   ```bash
+   aws ecr batch-get-image --region eu-central-1 \
+     --repository-name petclinic-{env}/{service} \
+     --image-ids imageTag=<existing-tag> \
+     --query 'images[0].imageManifest' --output text \
+   | aws ecr put-image --region eu-central-1 \
+     --repository-name petclinic-{env}/{service} \
+     --image-tag <tag-from-values-file> \
+     --image-manifest file:///dev/stdin
+   ```
+   Two things to know: `put-image` **adds** a tag and does not remove the old one, so `<existing-tag>` survives alongside — correct here, but do not expect a rename. And if you round-trip the manifest through `jq` you change the OCI **index** digest while the image is unchanged; compare the `arm64` child digest under `.manifests[]` to verify a retag, never the index digest.
+
+   **If the image does not exist at all**, re-run the build in the app repo. Do not hand-push a freshly built image: an image built outside the pipeline is not reproducible from the commit, which breaks the property that the tag identifies what was built — the same property the `git.properties` check above depends on.
+
+   Either way, if the values files are wrong rather than ECR, revert the tag update ([rollback by reverting the image tag](#procedure-rollback-by-reverting-the-image-tag)).
 
 **Verify:**
 
@@ -293,7 +322,7 @@ Treat it as an outage in progress rather than a failed deploy, and do not wait f
 **Who:** Engineer with dev access. **Dev only** — never rehearse on prod.
 **Time:** 20 minutes.
 
-**Blocked until E-17.** ArgoCD is not installed, so the sync this procedure depends on never happens and the rehearsal proves nothing. Run it once `k8s/argocd/` exists and the dev Application is syncing.
+**Runnable as of 2026-10-12.** ArgoCD v3.5.5 is installed and the eight dev Applications are `Synced` and `Healthy`, so the sync this procedure depends on actually happens. Prod's Applications exist in `k8s/argocd/applications/prod/` but have never been applied, so the prod half of the warning below is not live yet — it becomes live the day prod is applied, which is exactly when this procedure gets more dangerous to run.
 
 **Read this before starting.** A rehearsal writes a bad tag into `helm-values/{service}.yaml`, and that file is the shared service file: ArgoCD merges it with `dev.yaml` for dev and with `prod.yaml` for prod. The commit therefore changes **prod's desired state too**. Dev self-heals into it within a reconcile; prod is manual-sync, so it will not deploy on its own — but prod's desired state is now the rehearsal tag, and the next person who syncs prod for any reason deploys it. The rehearsal is only safe while:
 

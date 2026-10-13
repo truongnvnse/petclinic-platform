@@ -1,0 +1,144 @@
+# k8s/argocd/argocd-rbac-cm.yaml — PETPLAT-115
+#
+# ArgoCD RBAC. Two roles: the built-in admin, and a developer role that reads
+# everything and syncs only dev.
+#
+#   kubectl apply -f k8s/argocd/argocd-rbac-cm.yaml
+#
+# ---------------------------------------------------------------------------
+# This ConfigMap already exists. install.yaml creates an argocd-rbac-cm with
+# labels and no `data` at all, so applying this file fills it in. The trap is
+# the other direction: re-applying install.yaml afterwards removes every key
+# below, because kubectl's three-way merge deletes fields that were in the last
+# applied config and are absent from the new one. The result is not an error —
+# RBAC silently reverts to the defaults and the developer role stops existing.
+# If you ever re-apply install.yaml, re-apply this file after it.
+#
+# ---------------------------------------------------------------------------
+# Your policy.csv does NOT replace ArgoCD's built-in policy. The two are
+# concatenated — util/rbac/rbac.go builds the enforcer from
+# {builtinPolicy, userDefinedPolicy, runtimePolicy} in that order, and the
+# setters are documented as "augmenting". So the built-in roles keep working:
+#
+#   assets/builtin-policy.csv defines role:readonly, defines role:admin, and
+#   binds the admin user to it with `g, admin, role:admin`.
+#
+# That last line is why nothing below re-declares the admin role or the admin
+# user's binding. Adding them again would be harmless, but it would also read as
+# though they were required — and someone would eventually delete the "duplicate"
+# and lock the admin account out of its own ArgoCD.
+#
+# `policy.default: role:readonly` is set explicitly rather than left to the
+# built-in default so the fallback is visible here: anyone who authenticates but
+# matches no group gets read-only, not nothing.
+#
+# ---------------------------------------------------------------------------
+# Who gets what
+#
+#   admin       — full control of applications, clusters, repositories,
+#                 projects, accounts and certificates. Built-in; also the only
+#                 role that can sync prod, because role:developer's sync grant
+#                 is scoped to `default/*-dev` and casbin denies what is not
+#                 granted. The prod Applications have no automated sync policy
+#                 (PETPLAT-114), so this is the second lock on the same door.
+#
+#   developer   — read everything, sync dev only.
+#
+# ---------------------------------------------------------------------------
+# Two bindings, both inert until the identity they name exists:
+#
+#   g, developer, role:developer              — a local account, for testing
+#   g, petclinic-developers, role:developer   — an SSO group, for later
+#
+# To make the first real, add a line to the argocd-cm ConfigMap and restart the
+# server:
+#
+#   kubectl patch configmap argocd-cm -n argocd --type merge \
+#     -p '{"data":{"accounts.developer":"login"}}'
+#   kubectl rollout restart deployment argocd-server -n argocd
+#
+# then set its password with `argocd account update-password --account developer`.
+#
+# The second needs SSO, which is not configured — see "Optional: SSO" below.
+#
+# ---------------------------------------------------------------------------
+# Optional: SSO (not implemented — recorded here so the shape is known)
+#
+# ArgoCD delegates authentication to Dex or to an OIDC provider configured in
+# argocd-cm. Both end the same way: the identity provider asserts group
+# membership, and `scopes` below tells ArgoCD which claim to read the groups
+# from. For GitHub or Google the claim is `groups`; for some providers it is
+# `roles`, and for others only the email is available and the binding has to be
+# per-user rather than per-group.
+#
+# Nothing about the roles above would change — `g, petclinic-developers,
+# role:developer` is already the binding SSO would satisfy. Only `scopes` and
+# the argocd-cm `dex.config` / `oidc.config` block would be added.
+#
+# ---------------------------------------------------------------------------
+# The admin password is not in this file, and must not be put in it. The initial
+# value is auto-generated into the argocd-initial-admin-secret Secret in the
+# argocd namespace; retrieve it with:
+#
+#   kubectl -n argocd get secret argocd-initial-admin-secret \
+#     -o jsonpath='{.data.password}' | base64 -d
+#
+# Change it with `argocd account update-password`, and delete the initial secret
+# once the new password is confirmed working.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-rbac-cm
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: gitops
+    app.kubernetes.io/managed-by: kubectl
+data:
+  # Applied to any authenticated subject that no `p` rule and no `g` binding
+  # matches. ArgoCD's own default is also role:readonly; stated here so the
+  # fallback is not invisible.
+  policy.default: role:readonly
+
+  # Read groups from the identity provider's `groups` claim. Local accounts are
+  # matched by username instead, which is what makes `g, developer, ...` below
+  # work without SSO.
+  scopes: '[groups]'
+
+  policy.csv: |
+    # --- developer: read all, write only dev -------------------------------
+    #
+    # Object format for applications is <project>/<application>, so the dev
+    # scope is `default/*-dev` — every Application named `{service}-dev` in the
+    # default project. Prod Applications are `{service}-prod` and match nothing
+    # here, which is the whole restriction: casbin denies by default, so an
+    # absent rule is a denial and does not need a matching `deny` line.
+    #
+    # `sync` is the only write action granted. `applications, action/*` (restart,
+    # rollback) is deliberately NOT granted — it is a write, and the story scopes
+    # developers to syncing. Add it as `p, role:developer, applications,
+    # action/*, default/*-dev, allow` if restarting dev from the UI turns out to
+    # be wanted.
+    p, role:developer, applications, get, */*, allow
+    p, role:developer, applications, sync, default/*-dev, allow
+    p, role:developer, applicationsets, get, */*, allow
+    p, role:developer, logs, get, */*, allow
+
+    # Read-only on the things the UI reads to render an application: which
+    # cluster it targets, which repo it pulls from, and the project it belongs
+    # to. Without these the UI shows permission errors on the app detail page
+    # even though `applications, get` succeeded.
+    p, role:developer, clusters, get, *, allow
+    p, role:developer, repositories, get, *, allow
+    p, role:developer, projects, get, *, allow
+    p, role:developer, accounts, get, *, allow
+
+    # --- bindings ----------------------------------------------------------
+    #
+    # Neither identity exists yet, so neither line grants anything today. They
+    # are here so that enabling either one is a change to the identity, not to
+    # this policy — see the header.
+    g, developer, role:developer
+    g, petclinic-developers, role:developer

@@ -1,0 +1,63 @@
+# k8s/argocd/applications/prod/genai-service.yaml — PETPLAT-114
+#
+# ArgoCD Application for genai-service in prod. There is deliberately NO
+# `syncPolicy.automated` block: this Application reports OutOfSync and waits for
+# a human to run `argocd app sync genai-service-prod` or click Sync in the UI.
+# The omission is the policy — adding an empty `automated: {}` would turn
+# auto-sync on, which is the opposite of what prod is meant to do.
+#
+# valueFiles resolve against `path` (the chart directory) — not against this
+# file, and not against the repo root. helm/petclinic-service +
+# ../../helm-values/... is helm-values/... at the root: the same two files, in
+# the same order, that the runbook passes to `helm upgrade --install`.
+#
+# releaseName keeps the Helm release called `genai-service`, not
+# `genai-service-prod`. The chart names every object after the release
+# (templates/_helpers.tpl → petclinic-service.fullname), and those names are a
+# contract.
+#
+# genai-service is the one service whose runtime depends on a secret:
+# OPENAI_API_KEY, delivered by an ExternalSecret reading
+# petclinic/prod/openai-api-key from Secrets Manager. The ExternalSecret is
+# applied by hand from k8s/base/external-secrets/ and is NOT managed by this
+# Application. The dev ExternalSecret and the prod one read different secret
+# paths — the ESO IAM policy is scoped to `petclinic/{env}/*`, so a prod
+# ExternalSecret pointing at the dev path fails on AccessDenied, not on a
+# missing key.
+#
+# Prod is NOT deployable as it stands, and a sync will fail rather than surprise
+# you — helm-values/prod.yaml still carries the placeholder RDS endpoint
+# `REPLACE-ME-prod-rds-endpoint`, and the `petclinic-prod` ECR repositories have
+# no images in them. Both are prerequisites this Application cannot satisfy on
+# its own. Create the Application now so the set is complete and the dev work
+# has something to mirror; expect OutOfSync, not Synced.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: genai-service-prod
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: genai-service
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/component: gitops
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/truongnvnse/petclinic-platform.git
+    targetRevision: main
+    path: helm/petclinic-service
+    helm:
+      releaseName: genai-service
+      valueFiles:
+        - ../../helm-values/genai-service.yaml
+        - ../../helm-values/prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: petclinic-prod
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true

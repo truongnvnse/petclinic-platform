@@ -1,0 +1,39 @@
+# k8s/argocd/install/namespace.yaml — PETPLAT-112
+#
+# The argocd namespace, and the only file in this directory that is safe to
+# apply on its own.
+#
+# install.yaml does NOT create this namespace and does not name it on any of its
+# resources. All 59 of its documents omit metadata.namespace — the three
+# `namespace: argocd` strings in that file are inside ClusterRoleBinding
+# `subjects:`, naming ServiceAccounts, not resources. So every namespaced object
+# in the upstream manifest lands in whatever namespace kubectl is pointed at,
+# and the install command has to say so:
+#
+#   kubectl apply -f k8s/argocd/install/namespace.yaml
+#   kubectl apply -n argocd -f k8s/argocd/install/install.yaml
+#
+# Drop the `-n argocd` and the install succeeds, looks healthy in `kubectl get
+# pods -n argocd` (empty), and puts ArgoCD in `default` instead. Nothing errors.
+#
+# Apply this file on its own rather than as part of a directory apply. kubectl
+# does sort a multi-file apply by kind and Namespace sorts early, but a command
+# that creates a namespace and then writes into it is relying on that ordering
+# to hold — and the failure mode when it does not is the silent one above.
+#
+# Labels are ArgoCD's own set, not the petclinic set from
+# docs/technical-spec.md → "Standard Labels". ArgoCD is cluster infrastructure
+# shared by both environments, not a petclinic workload: labelling it
+# part-of=petclinic would make `kubectl get ns -l app.kubernetes.io/part-of=petclinic`
+# claim it, and any future "delete everything petclinic" sweep would take the CD
+# system with it.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    app.kubernetes.io/name: argocd
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: gitops
+    app.kubernetes.io/managed-by: kubectl
