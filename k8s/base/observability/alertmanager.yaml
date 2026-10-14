@@ -1,0 +1,403 @@
+# alertmanager.yaml — Alertmanager: where a firing alert becomes a notification
+#
+# PETPLAT-103. The last hop of the alert path: Prometheus evaluates the rules in
+# alerting-rules.yaml and posts the ones that fire here (the `alerting` block in
+# prometheus.yaml), Loki's ruler posts its log alerts to the same place (the
+# `alertmanager_url` in loki.yaml), and this process decides who hears about it.
+#
+# Values from docs/technical-spec.md → "Observability" → "Alertmanager":
+#   namespace monitoring · Slack (recommended channel)
+#   Critical Routing — immediate notification
+#   Warning Routing  — batched, 5m group interval
+#
+# ---------------------------------------------------------------------------
+# Two receivers, one routing tree, and the fall-through that makes it work
+#
+# `route` has a receiver of its own AND a child route, which is the part worth
+# reading twice. Routing is a tree walk: an alert is tested against the child
+# routes first, and only if none of them match does it fall back to the parent's
+# own receiver. So:
+#
+#   severity=critical  → matches the child  → receiver `critical`  (group_wait 0s)
+#   anything else      → matches no child   → receiver `warning`   (group_wait 30s)
+#
+# That is the spec's two routing rows expressed in one object, with no `match`
+# on the warning side to keep in sync with the severity labels in
+# alerting-rules.yaml. A rule added later with a severity this file has never
+# heard of lands in `warning` rather than being dropped — the safe direction to
+# fail, since a missing notification is invisible and a noisy one is not.
+#
+# `group_wait` is the whole difference between the two rows. An alert waits
+# group_wait before its first notification so that alerts arriving together are
+# sent as one message. At 0s a critical alert notifies on the evaluation that
+# fires it; at 30s a warning collects its siblings first.
+# ---------------------------------------------------------------------------
+#
+# The webhook URL is not in this file
+#
+# `api_url_file`, not `api_url`. The file path is read when a notification is
+# sent, so the URL never enters the ConfigMap, the Deployment, or this
+# repository — which is the "no secrets in code" rule applied to the one
+# credential this stack has.
+#
+# ---------------------------------------------------------------------------
+# Why the Secret is created by hand rather than by an ExternalSecret
+#
+# Every other secret in this platform comes from AWS Secrets Manager through
+# ESO, and this one cannot. The ClusterSecretStore carries
+#
+#     spec.conditions.namespaceRegexes: ["^petclinic-dev$", "^petclinic-prod$"]
+#
+# which is a deliberate limit, not an oversight: the credentials behind that
+# store are the RDS master password and the OpenAI key, and the condition is
+# what stops a workload in any other namespace from minting an ExternalSecret
+# against them. An ExternalSecret in `monitoring` is refused by that condition
+# and sits in SecretSynced=False with a store-not-found error.
+#
+# Widening the regex to include `monitoring` would let every pod in this
+# namespace read the database password, to save one manual `kubectl create
+# secret` for a Slack webhook. Not a trade worth making.
+#
+# So the Secret is created once, by hand, outside Git:
+#
+#     kubectl create secret generic alertmanager-slack -n monitoring \
+#       --from-literal=slack_api_url='https://hooks.slack.com/services/...'
+#
+# The volume below mounts it with `optional: true`, which is what lets this
+# manifest apply cleanly on a cluster where that command has not been run yet.
+# Verified against prom/alertmanager:v0.34.1: with the file absent the process
+# starts, /-/ready returns 200, and `amtool check-config` parses the config with
+# 1 receiver — the missing file is only read at notification time, and only then
+# does it produce an error. A non-optional mount would instead leave the pod
+# stuck in ContainerCreating, which looks like a broken manifest rather than a
+# missing secret.
+#
+# The failure mode to know about: with no Secret, alerts fire, routing works,
+# and every notification is dropped with `Notify attempt failed` in the log.
+# Nothing else reports a problem, because nothing else is wrong.
+# ---------------------------------------------------------------------------
+
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+data:
+  alertmanager.yml: |
+    global:
+      # How long to wait before declaring an alert resolved when it stops being
+      # sent. Prometheus re-sends a firing alert every evaluation interval, so
+      # this only has to outlast a scrape hiccup or two — not the `for` duration
+      # of any rule.
+      resolve_timeout: 5m
+
+    route:
+      receiver: warning
+
+      # What counts as "the same alert" for grouping. `alertname` alone would
+      # merge a dev outage with a prod one into a single message; adding
+      # `namespace` keeps the two environments apart, which matters because
+      # k8s/base/ is applied to both and every alert carries both labels.
+      group_by: [alertname, namespace, job]
+
+      # Spec: warnings are batched on a 5m group interval. group_wait is the
+      # first-notification delay; group_interval is the delay before an update
+      # to an already-notified group is sent.
+      group_wait: 30s
+      group_interval: 5m
+
+      # 4h between repeats of an unresolved alert. Long on purpose: a rule with
+      # `for: 5m` that stays firing for hours is a condition someone is already
+      # looking at, and re-notifying every 15 minutes trains people to ignore
+      # the channel.
+      repeat_interval: 4h
+
+      routes:
+        - receiver: critical
+
+          # `matchers`, not the older `match`/`match_re`. Both are accepted by
+          # v0.34.1, but `match` is deprecated in favour of this syntax and the
+          # two are mutually exclusive within one route.
+          matchers:
+            - severity = critical
+
+          # Spec: immediate notification. 0s means the alert is sent on the
+          # evaluation that fires it, with no grouping delay at all.
+          group_wait: 0s
+
+          # Tighter than the parent's, because this is the path a person is
+          # expected to act on. Still not 0s: an update loop here would be worse
+          # than a slightly stale message.
+          group_interval: 1m
+          repeat_interval: 1h
+
+    # -----------------------------------------------------------------------
+    # A critical alert suppresses the warnings it explains
+    #
+    # When a pod is in a restart loop, Prometheus also reports the service as
+    # down and its memory ratio as high — three alerts, one cause. Without this
+    # rule all three are notified, and the two that matter least arrive first
+    # because their `for` durations are shorter.
+    #
+    # `equal: [alertname, namespace]` is what keeps the suppression honest: a
+    # critical alert only silences a warning with the same name in the same
+    # namespace, so a genuine second problem is never hidden behind an
+    # unrelated one.
+    # -----------------------------------------------------------------------
+    inhibit_rules:
+      - source_matchers:
+          - severity = critical
+        target_matchers:
+          - severity = warning
+        equal: [alertname, namespace]
+
+    receivers:
+      # ---------------------------------------------------------------------
+      # `warning` — the default receiver, and the one every alert lands in
+      # unless it is critical. Reached by fall-through, so there is no matcher
+      # here to keep aligned with the severity labels in alerting-rules.yaml.
+      # ---------------------------------------------------------------------
+      - name: warning
+
+        slack_configs:
+          # Read at send time from the Secret mounted below. With the Secret
+          # absent this is where the error appears — see the header.
+          - api_url_file: /etc/alertmanager/secrets/slack_api_url
+
+            channel: "#petclinic-alerts"
+
+            # A message when the alert clears. Without it the channel shows an
+            # outage that ended hours ago, and the only way to tell whether a
+            # problem is still live is to open Prometheus.
+            send_resolved: true
+
+            title: >-
+              {{ if eq .Status "firing" }}[{{ .CommonLabels.severity | toUpper }}]
+              {{ end }}{{ .CommonLabels.alertname }}{{ if eq .Status "resolved" }}
+              (resolved){{ end }}
+
+            # Grouped by alertname and namespace, so `.Alerts` is the set of
+            # pods or jobs hitting the same condition. Listed rather than
+            # summarised: with one replica per service in dev there is rarely
+            # more than one, and the name is the useful part.
+            text: >-
+              {{ range .Alerts }}{{ .Annotations.summary }}
+              {{ end }}{{ if eq .Status "resolved" }}Recovered. {{ end }}
+
+      # ---------------------------------------------------------------------
+      # `critical` — a separate receiver rather than the same one with a
+      # different template, because a receiver is the unit that a channel or a
+      # webhook is attached to. Pointing this at a second Slack channel, or at a
+      # pager, is then an edit to this block alone.
+      #
+      # Today it posts to the same channel as `warning`, which is what a single
+      # Slack workspace with no on-call rotation looks like. The routing is what
+      # matters and it is already correct; splitting the destination later does
+      # not require touching the route above.
+      # ---------------------------------------------------------------------
+      - name: critical
+
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/slack_api_url
+
+            channel: "#petclinic-alerts"
+            send_resolved: true
+
+            title: >-
+              {{ if eq .Status "firing" }}[CRITICAL]
+              {{ end }}{{ .CommonLabels.alertname }}{{ if eq .Status "resolved" }}
+              (resolved){{ end }}
+
+            text: >-
+              {{ range .Alerts }}{{ .Annotations.description }}
+              {{ end }}
+
+---
+# ===========================================================================
+# The server
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: alertmanager
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  # One. Alertmanager supports clustering for high availability, and it is the
+  # one component here where that would be a real design rather than a replica
+  # count — peers gossip to deduplicate notifications, so two replicas need the
+  # gossip port open between them and a shared view of silences. Neither is
+  # worth building for a platform whose alerts go to one Slack channel.
+  replicas: 1
+
+  # Recreate rather than RollingUpdate. There is no volume to contend for, so
+  # this is about the notification path: a rolling update briefly runs two
+  # Alertmanagers, and with no clustering both would notify for the same alert.
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertmanager
+        app.kubernetes.io/part-of: petclinic
+        app.kubernetes.io/managed-by: kubectl
+        app.kubernetes.io/component: observability
+
+    spec:
+      # No ServiceAccount of its own, and no token in the pod. Alertmanager
+      # reads a config file and posts to a webhook; it never calls the
+      # Kubernetes API, so there is nothing for a token to authorise. The
+      # default ServiceAccount would mount one anyway, which is why this is
+      # set explicitly rather than left out.
+      automountServiceAccountToken: false
+
+      securityContext:
+        # The prom/alertmanager image runs as nobody. Nothing here writes
+        # outside /alertmanager, so no fsGroup is needed — the data directory
+        # is an emptyDir, which the kubelet chowns to this uid.
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+
+      containers:
+        - name: alertmanager
+
+          image: prom/alertmanager:v0.34.1
+
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+
+            # Empty disables the HA gossip listener. With one replica there is
+            # no peer to gossip with, and leaving it on means the log carries
+            # `cluster settling` messages and the pod holds a port open for
+            # nothing. Remove this flag if a second replica is ever added —
+            # that is the only change clustering would need from this file.
+            - --cluster.listen-address=
+
+          ports:
+            - name: http
+              containerPort: 9093
+              protocol: TCP
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+
+            # A subdirectory of the config mount, which is the point: the file
+            # lands at /etc/alertmanager/secrets/slack_api_url, exactly the
+            # path api_url_file names above. It shadows the (nonexistent)
+            # `secrets` directory the config volume would otherwise provide.
+            - name: secrets
+              mountPath: /etc/alertmanager/secrets
+              readOnly: true
+
+            - name: data
+              mountPath: /alertmanager
+
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+
+          resources:
+            # The smallest of the three observability servers. It holds no
+            # time series: a config, a set of in-flight alerts, and a
+            # notification log.
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+
+        # `optional: true` is load-bearing — see the header. Without it a
+        # cluster that has not had the Secret created yet leaves this pod in
+        # ContainerCreating forever, and the manifest looks wrong rather than
+        # incomplete.
+        - name: secrets
+          secret:
+            secretName: alertmanager-slack
+            optional: true
+
+        # Silences and the notification log live here. An emptyDir means both
+        # are lost when the pod restarts, and the visible consequence is that a
+        # resolved alert can re-notify once afterwards, because the notification
+        # log that would have suppressed it is gone. Accepted rather than given
+        # a fourth EBS volume: it costs a duplicate Slack message after a
+        # restart, and nothing else. Swap for a PersistentVolumeClaim if
+        # silences are ever expected to outlive a pod — an alert silenced
+        # during maintenance comes back the moment this restarts.
+        - name: data
+          emptyDir: {}
+
+---
+# ===========================================================================
+# Service
+#
+# Both senders reach Alertmanager by this name:
+#   prometheus.yaml → alerting.alertmanagers → alertmanager.monitoring.svc.cluster.local:9093
+#   loki.yaml       → ruler.alertmanager_url    → the same string
+#
+# The fully qualified form appears in both because neither Prometheus nor Loki
+# is in the same namespace as this Service. `alertmanager:9093` would resolve
+# only from inside `monitoring`.
+# ===========================================================================
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: alertmanager
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: alertmanager
+
+  ports:
+    - name: http
+      port: 9093
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,263 @@
+# zipkin.yaml — Zipkin: the trace store the five traced services report to
+#
+# PETPLAT-60. A Deployment and a Service in the `tracing` namespace, which is a
+# namespace of its own rather than a corner of `monitoring` — see namespace.yaml
+# for why the two-label name is part of the contract.
+#
+# Values from docs/technical-spec.md → "Observability" → "Zipkin (Tracing)":
+#   namespace tracing · port 9411 · image openzipkin/zipkin
+#
+# ---------------------------------------------------------------------------
+# The endpoint the services actually use, and the one they are configured with
+#
+# These are not the same string, and the difference is worth knowing before
+# debugging an empty Zipkin UI.
+#
+# The application config lives in a separate repository, which the config server
+# serves:
+#
+#     https://github.com/spring-petclinic/spring-petclinic-microservices-config
+#
+# Its `application.yml` sets the endpoint **only under the `docker` profile**:
+#
+#     ---
+#     spring:
+#       config:
+#         activate:
+#           on-profile: docker
+#     management:
+#       tracing:
+#         export:
+#           zipkin:
+#             endpoint: "http://tracing-server:9411/api/v2/spans"
+#
+# `tracing-server` is a bare name — it is the container name in the app's own
+# docker-compose.yml, where every service shares one network and a one-label
+# name resolves. In Kubernetes a bare name resolves only inside the pod's own
+# namespace, and there is no Service called `tracing-server` in petclinic-dev or
+# petclinic-prod. The Service below is `zipkin` in `tracing`, which that name
+# can never reach.
+#
+# So the deployed services carry an explicit endpoint override in their Helm
+# values — see the `MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT` entry in
+# helm-values/{api-gateway,customers-service,visits-service,vets-service,genai-service}.yaml.
+# An OS environment variable outranks config data, and a config server served
+# through `spring.config.import` is config data, so the override wins over the
+# config repo. That ordering is documented in the Spring Boot reference under
+# "Externalized Configuration"; it is the modern Config Data behaviour and is
+# not the same as the old bootstrap model, where remote properties were inserted
+# ahead of the environment and won.
+#
+# Without the override, the tracing libraries load, spans are built, and the
+# export fails against a name that does not resolve — with the only evidence a
+# periodic log line inside each application pod.
+# ---------------------------------------------------------------------------
+#
+# Storage: in memory, and traces do not survive a restart
+#
+# `STORAGE_TYPE=mem` is Zipkin's default, set explicitly so it is a decision on
+# the record rather than an accident. There is no PersistentVolumeClaim in this
+# file because the spec's Zipkin table names no storage, and because the
+# alternative is a second EBS volume for data whose entire purpose is to be
+# looked at during a demo.
+#
+# The consequence: `kubectl rollout restart deploy/zipkin` loses every trace.
+# Elasticsearch or Cassandra behind Zipkin would fix that, and neither is worth
+# running for this. An empty UI right after a restart is expected, not a bug.
+# ---------------------------------------------------------------------------
+#
+# Pod Security: this namespace enforces `restricted`
+#
+# `tracing` is the only namespace in the platform at the strictest PSA level,
+# because it holds one workload and that workload complies. Two things had to be
+# checked rather than assumed:
+#
+#   * The image runs as uid 1000 (`zipkin`), not root. Its reputation says
+#     otherwise; `docker run openzipkin/zipkin:3 id -u` says 1000.
+#   * It runs with every capability dropped. Verified by starting the image with
+#     `--cap-drop ALL --security-opt no-new-privileges`: /health returns 200,
+#     POST /api/v2/spans returns 202, and CapEff in the container reads
+#     0000000000000000.
+#
+# The securityContext below sets the four things the restricted policy asks for
+# — runAsNonRoot, allowPrivilegeEscalation false, capabilities drop ALL,
+# seccompProfile RuntimeDefault. Its volumes are a configMap and an emptyDir,
+# both on the restricted policy's allowed list. Nothing here needs hostPath,
+# which is what forces `monitoring` to stay unenforced.
+# ---------------------------------------------------------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: zipkin
+  namespace: tracing
+
+  labels:
+    app.kubernetes.io/name: zipkin
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  # One. In-memory storage means a second replica would hold a different half of
+  # the traces and the Service would round-robin between them, so the UI would
+  # show a different answer on every refresh. Zipkin supports a shared store
+  # behind several replicas; this does not, and is not meant to.
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zipkin
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zipkin
+        app.kubernetes.io/part-of: petclinic
+        app.kubernetes.io/managed-by: kubectl
+        app.kubernetes.io/component: observability
+
+    spec:
+      # Zipkin receives spans over HTTP and answers queries from memory. It
+      # never calls the Kubernetes API, so there is nothing for a token to
+      # authorise and the default ServiceAccount's automounted one is turned off.
+      automountServiceAccountToken: false
+
+      securityContext:
+        # uid 1000 is the `zipkin` user the image declares. runAsNonRoot is what
+        # the restricted policy actually checks; runAsUser is here so the uid is
+        # pinned rather than inherited from the image, which could change under
+        # a new tag.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+
+        # Pod-level, which satisfies the policy for every container in the pod
+        # without repeating it below.
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: zipkin
+
+          # Pinned. Zipkin 3 is the current major and this is its moving tag;
+          # a rebuild should not silently pick up a new one. The image is
+          # multi-arch and publishes linux/arm64, which the Graviton nodes need.
+          image: openzipkin/zipkin:3
+
+          env:
+            # The default, written down. Zipkin reads this at startup and picks
+            # its storage component from it.
+            - name: STORAGE_TYPE
+              value: mem
+
+            # Bounded heap. Left unset, the JVM sizes its heap from the node's
+            # total memory rather than from the container limit, which on a
+            # 4GiB node is far more than the limit below and ends in an OOM kill
+            # rather than a garbage collection. -Xmx384m against a 768Mi limit
+            # leaves room for metaspace, thread stacks and the code cache, and
+            # keeps steady-state usage clear of the 80% mark the HighMemoryUsage
+            # rule in alerting-rules.yaml fires at.
+            - name: JAVA_OPTS
+              value: "-Xms128m -Xmx384m"
+
+          ports:
+            - name: http
+              containerPort: 9411
+              protocol: TCP
+
+          # /health is Zipkin's own actuator-style endpoint and reports the
+          # storage component underneath it, so a Zipkin that has started but
+          # cannot reach its store fails readiness rather than serving an empty
+          # UI. Verified: returns 200 with {"status":"UP","zipkin":{...}}.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            # A JVM starting Spring Boot. Measured at roughly 20 seconds cold,
+            # and the probe only has to be late, not early.
+            initialDelaySeconds: 20
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              # 2x the heap ceiling, which is the headroom a JVM needs for the
+              # non-heap regions above.
+              memory: 768Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+
+            capabilities:
+              # Nothing here binds a privileged port — 9411 is above 1024 — so
+              # there is no capability to add back, unlike the policy's
+              # NET_BIND_SERVICE allowance.
+              drop:
+                - ALL
+
+---
+# ===========================================================================
+# Service
+#
+# `zipkin.tracing:9411` is the name the five traced services are given through
+# MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT in their Helm values. It is a
+# two-label name and the second label is this Service's namespace, which is the
+# whole reason Zipkin does not live in `monitoring`.
+#
+# The port is named `http` to match every other Service in the platform.
+# ===========================================================================
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: zipkin
+  namespace: tracing
+
+  labels:
+    app.kubernetes.io/name: zipkin
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: zipkin
+
+  ports:
+    - name: http
+      port: 9411
+      targetPort: http
+      protocol: TCP
+
+# ---------------------------------------------------------------------------
+# Reaching the UI
+#
+# There is no Ingress. The only public entry point in this platform is the ALB
+# in front of api-gateway (ADR-0001), and a trace viewer is not a public page.
+# Port-forward is the way in:
+#
+#     kubectl port-forward -n tracing svc/zipkin 9411:9411
+#     open http://localhost:9411
+#
+# An empty result there has three usual causes, in order of likelihood:
+#   1. No traffic has hit the services yet — Zipkin shows nothing until a
+#      request has been traced end to end.
+#   2. The endpoint override is missing from the service's Helm values, so spans
+#      are being posted to `tracing-server`, which does not resolve.
+#   3. Zipkin restarted, and the in-memory store went with it.
+# ---------------------------------------------------------------------------

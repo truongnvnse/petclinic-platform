@@ -1,0 +1,492 @@
+# prometheus.yaml — Prometheus: scrape, evaluate, hand off to Alertmanager
+#
+# PETPLAT-55 (deployment, scrape configuration, storage) and half of PETPLAT-58
+# (rule evaluation and the Alertmanager connection). The rules themselves live in
+# alerting-rules.yaml; this file is the server that loads and evaluates them.
+#
+# Values from docs/technical-spec.md → "Observability" → "Prometheus":
+#   namespace monitoring · scrape interval 15s · evaluation interval 15s
+#   retention 7 days (dev) / 15 days (prod) · EBS 10Gi (dev) / 50Gi (prod)
+#
+# ---------------------------------------------------------------------------
+# Five scrape jobs, not one per service
+#
+# The spec's "Scrape Targets" table lists one job per service. This config
+# produces exactly those job names — `up{job="vets-service"}` and friends — but
+# from a single job whose `job` label is relabelled from the Service name. The
+# label that comes out is identical; what changes is that the list of services
+# is written once, in the `keep` rule, instead of five times.
+#
+# Targets come from service discovery (`role: endpoints`) rather than from five
+# hardcoded `host:port` strings. Two reasons:
+#
+#   * k8s/base/ is shared by two clusters. A static target has to spell the
+#     namespace — `vets-service.petclinic-dev:8083` — and the same file applied
+#     to prod would resolve nothing and scrape nothing, with no error anywhere:
+#     the targets would simply sit at `up == 0`, or not appear at all. The
+#     `keep` rule below names no namespace, so the file is correct in both.
+#   * The port comes from the Endpoints object, which the chart derives from
+#     each service's real `service.port`. Nothing here can drift from the
+#     Service it is scraping.
+#
+# ---------------------------------------------------------------------------
+# The five services, and why only five
+#
+#   api-gateway       8080
+#   customers-service 8081
+#   visits-service    8082
+#   vets-service      8083
+#   genai-service     8084
+#
+# These are the only modules whose pom.xml carries
+# `micrometer-registry-prometheus`. config-server, discovery-server and
+# admin-server do not, so /actuator/prometheus on them is a 404 — the target
+# would be permanently down and ServiceDown would fire forever for three
+# services that are working perfectly.
+#
+# The spec's table lists all eight. The spec is wrong on this point; the
+# enforcement rule and the poms agree with each other and this config follows
+# them.
+# ---------------------------------------------------------------------------
+#
+# What is NOT here: the Prometheus Operator
+#
+# This is a plain Prometheus Deployment, so it reads rules from `rule_files` on
+# disk. That is why alerting-rules.yaml also carries a ConfigMap holding the same
+# rules: the PrometheusRule custom resource in that file is inert until an
+# operator is installed to translate it. The header there explains the split.
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# RBAC — what service discovery needs, and nothing more
+#
+# `role: endpoints` and `role: node` both list and watch cluster-wide objects,
+# so a namespaced Role is not enough. The ClusterRole grants read on exactly
+# four resource types:
+#
+#   services, endpoints  — the discovery itself, for the five scrape jobs
+#   pods                 — the `pod` label on each target
+#   nodes                — the cAdvisor job's node discovery
+#   nodes/metrics        — what the kubelet authorises a bearer token against
+#                          for /metrics/cadvisor. Not `nodes/proxy`: that would
+#                          also open every other kubelet endpoint, including
+#                          exec, and this config needs none of them.
+#
+# No write verbs anywhere, and no `*` in the resource list.
+# ===========================================================================
+
+apiVersion: v1
+kind: ServiceAccount
+
+metadata:
+  name: prometheus
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+
+metadata:
+  name: prometheus
+
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+rules:
+  - apiGroups: [""]
+    resources: ["services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+
+metadata:
+  name: prometheus
+
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+
+---
+# ===========================================================================
+# Scrape configuration, alerting hand-off and rule files
+# ===========================================================================
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+data:
+  prometheus.yml: |
+    global:
+      # Both from the spec's Prometheus table. The evaluation interval is what
+      # decides how often a `for: 1m` rule is checked, so a rule cannot fire
+      # sooner than one evaluation tick after its condition holds.
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    rule_files:
+      # One glob over a directory rather than a list of filenames: adding a rule
+      # file is then a ConfigMap key, not an edit here. alerting-rules.yaml
+      # mounts the directory.
+      - /etc/prometheus/rules/*.rules.yaml
+
+    alerting:
+      alertmanagers:
+        # Without this block Prometheus evaluates every rule, marks them all
+        # Firing, and sends nothing — the alerts exist only in the Prometheus UI.
+        # This is the connection the enforcement rule asks for.
+        - static_configs:
+            - targets:
+                - alertmanager.monitoring.svc.cluster.local:9093
+
+    scrape_configs:
+      # -------------------------------------------------------------------
+      # The five application services. See the header for why five and not
+      # eight, and why the targets are discovered rather than listed.
+      # -------------------------------------------------------------------
+      - job_name: petclinic-services
+
+        metrics_path: /actuator/prometheus
+        scheme: http
+
+        kubernetes_sd_configs:
+          - role: endpoints
+
+        relabel_configs:
+          # Keep exactly the five services that expose a Prometheus registry.
+          # Prometheus anchors relabel regexes, so this is a full-string match:
+          # `api-gateway` does not also match `api-gateway-something`.
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: api-gateway|customers-service|visits-service|vets-service|genai-service
+            action: keep
+
+          # Keep only the Service's `http` port. The chart names every Service
+          # port `http` (helm/petclinic-service/values.yaml → service.portName)
+          # and points targetPort at that name, so the Endpoints object always
+          # carries the real container port under this name. A service that
+          # later grows a second port — an admin or metrics port — is then
+          # scraped once, not twice.
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            regex: http
+            action: keep
+
+          # The `job` label becomes the service name, which is what makes
+          # `up{job="vets-service"}` and every dashboard query in PETPLAT-57
+          # work. Verified against prom/prometheus:v3.13.4: relabelling runs
+          # after `job` is populated from `job_name`, so this replaces it.
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: job
+
+          # Kept so a query can tell dev from prod when both clusters are
+          # scraped into one Grafana, and so a log line names the namespace
+          # rather than an IP.
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+          # The pod name, not the pod IP: `up{job="vets-service", pod=...}` is
+          # readable, and it survives a pod being rescheduled onto a new IP.
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+
+      # -------------------------------------------------------------------
+      # kubelet — the cAdvisor metrics HighMemoryUsage is written against
+      #
+      # container_memory_working_set_bytes and container_spec_memory_limit_bytes
+      # are cAdvisor metrics. Nothing else in the cluster exposes them, so
+      # without this job that rule can never fire — it would sit in the rules
+      # file looking correct and silently evaluate to no data forever.
+      #
+      # role: node defaults the target address to the node's InternalIP on the
+      # kubelet port (10250), which is reachable from a pod in an EKS VPC. The
+      # bearer token is the pod's own service account token, and `nodes/metrics`
+      # in the ClusterRole above is what the kubelet checks it against.
+      #
+      # insecure_skip_verify: the kubelet serves a node certificate that the
+      # cluster CA does not sign, so there is nothing here for Prometheus to
+      # verify it against. Traffic is still TLS and stays inside the VPC; the
+      # alternative is proxying through the API server, which needs
+      # `nodes/proxy` — a far broader grant than skipping this check.
+      # -------------------------------------------------------------------
+      - job_name: kubernetes-nodes-cadvisor
+
+        scheme: https
+        metrics_path: /metrics/cadvisor
+
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+
+        tls_config:
+          insecure_skip_verify: true
+
+        kubernetes_sd_configs:
+          - role: node
+
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+
+      # -------------------------------------------------------------------
+      # kube-state-metrics — the metric PodRestartLoop is written against
+      #
+      # kube_pod_container_status_restarts_total is a kube-state-metrics metric.
+      # The workload itself is in kube-state-metrics.yaml.
+      # -------------------------------------------------------------------
+      - job_name: kube-state-metrics
+
+        kubernetes_sd_configs:
+          - role: endpoints
+
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: kube-state-metrics
+            action: keep
+
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            regex: http-metrics
+            action: keep
+
+---
+# ===========================================================================
+# The server
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: prometheus
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  # One replica, and it cannot be more than one: the time-series database is a
+  # single-writer store on a ReadWriteOnce volume, and two Prometheis behind one
+  # Service would each hold half the series. Scaling this out means a remote-write
+  # setup, which is a different design rather than a replica count.
+  replicas: 1
+
+  strategy:
+    # Recreate, not RollingUpdate. A rolling update would start the new pod
+    # before the old one releases the EBS volume, and the new pod would sit
+    # ContainerCreating on a volume that is still attached elsewhere.
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: prometheus
+        app.kubernetes.io/part-of: petclinic
+        app.kubernetes.io/managed-by: kubectl
+        app.kubernetes.io/component: observability
+
+    spec:
+      serviceAccountName: prometheus
+
+      securityContext:
+        # The prom/prometheus image runs as nobody (65534). fsGroup is what makes
+        # the EBS volume writable by that user: without it the volume mounts
+        # root-owned and Prometheus fails at startup on its own TSDB directory.
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+
+      containers:
+        - name: prometheus
+
+          # Pinned. `latest` would let a rebuild of this stack pull a different
+          # major version and migrate the TSDB format underneath the data.
+          image: prom/prometheus:v3.13.4
+
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+
+            # Spec: 7 days dev, 15 days prod. Prod runs its own copy of this
+            # file with 15d — the same class of per-environment difference as
+            # the volume size below.
+            - --storage.tsdb.retention.time=7d
+
+            # Lets a ConfigMap change be picked up with
+            #   kubectl exec deploy/prometheus -n monitoring -- \
+            #     wget -qO- --post-data='' localhost:9090/-/reload
+            # instead of a pod restart. The endpoint is unauthenticated, which
+            # is why Prometheus is a ClusterIP with no Ingress: only something
+            # already inside the cluster can reach it.
+            - --web.enable-lifecycle
+
+          ports:
+            - name: http
+              containerPort: 9090
+              protocol: TCP
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+
+            # A second volume over a subdirectory of the first. The rules
+            # directory has to be a separate ConfigMap so that editing a rule
+            # does not rewrite prometheus.yml, and the mount shadows the empty
+            # `rules/` directory the config volume would otherwise provide.
+            - name: rules
+              mountPath: /etc/prometheus/rules
+
+            - name: data
+              mountPath: /prometheus
+
+          # Prometheus's own endpoints, not the application's — this is the
+          # server checking itself. `/-/ready` returns 503 until the TSDB and
+          # the config have both loaded, which is the point at which the
+          # Service should start sending to it.
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            # Longer than the readiness delay: a slow start should not be
+            # restarted, only kept out of the Service.
+            initialDelaySeconds: 30
+            periodSeconds: 15
+
+          resources:
+            # Above the 128Mi/512Mi the application services use, because this
+            # is a database: the head block is held in memory, and a scrape
+            # every 15s across a growing number of series is what fills it.
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+
+        - name: rules
+          configMap:
+            name: prometheus-rules
+
+        - name: data
+          persistentVolumeClaim:
+            claimName: prometheus-data
+
+---
+# ===========================================================================
+# Service — ClusterIP, and no Ingress anywhere
+#
+# Grafana reaches Prometheus at http://prometheus:9090 (see grafana.yaml), and
+# the Grafana datasource UID is pinned there. Nothing outside the cluster can
+# reach this: there is no Ingress for it, and the only public entry point in the
+# whole platform is the ALB in front of api-gateway.
+# ===========================================================================
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: prometheus
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: prometheus
+
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
+      protocol: TCP
+
+---
+# ===========================================================================
+# Storage
+#
+# 10Gi dev / 50Gi prod, from the spec's Prometheus table. gp3 is the class
+# defined in storageclass.yaml; naming it explicitly is required because the
+# cluster has no default StorageClass.
+# ===========================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+
+metadata:
+  name: prometheus-data
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  accessModes:
+    # ReadWriteOnce: an EBS volume attaches to one node at a time. This is what
+    # fixes the replica count at one.
+    - ReadWriteOnce
+
+  storageClassName: gp3
+
+  resources:
+    requests:
+      storage: 10Gi

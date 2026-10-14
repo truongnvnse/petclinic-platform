@@ -390,7 +390,11 @@ else
   echo "Pushed ${COUNT} image(s) at tag ${TAG}:"
 fi
 echo "$BUILT" | while IFS= read -r line; do
-  [[ -n "$line" ]] && echo "  ${line}"
+  # `if`, not `[[ ]] &&` — $BUILT ends in a newline, so the loop always sees a
+  # final empty line. As the last command of the body, `[[ -n "" ]] && echo`
+  # returns 1 there, and with `set -e` on a pipefail pipeline that kills the
+  # script *after* a successful push: exit 1 and no closing banner.
+  if [[ -n "$line" ]]; then echo "  ${line}"; fi
 done
 
 if [[ "$NO_PUSH" == "false" ]]; then

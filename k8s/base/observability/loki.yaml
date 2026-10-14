@@ -1,0 +1,357 @@
+# loki.yaml — Loki: the log store behind the Grafana Loki datasource
+#
+# PETPLAT-59. FluentBit ships container logs here (fluentbit.yaml), Grafana
+# queries them through the `loki` datasource (grafana.yaml), and the ruler
+# evaluates the two LogQL alerts in alerting-rules.yaml.
+#
+# Values from docs/technical-spec.md → "Observability" → "Loki":
+#   namespace monitoring · port 3100 · image grafana/loki
+#   EBS 10Gi (dev) / 50Gi (prod) · retention 7 days (dev) / 30 days (prod)
+#
+# ---------------------------------------------------------------------------
+# Single binary, filesystem storage, no auth
+#
+# One process running every Loki component (`target` defaults to `all`), backed
+# by a directory on an EBS volume. That is the whole of the design, and it is
+# what the spec asks for. It has the usual consequences, all of them acceptable
+# at this size and all of them worth knowing:
+#
+#   * The volume is ReadWriteOnce, so this cannot scale past one replica.
+#   * There is no object storage, so a lost volume is lost logs. Retention is
+#     the only thing that bounds growth, which is why the compactor below is
+#     enabled rather than left at its default of off.
+#   * `auth_enabled: false`, so every request is the single tenant `fake`. That
+#     is not a detail — the ruler's rule directory is named after the tenant.
+#     See the note in alerting-rules.yaml.
+#
+# FluentBit needs no credential to write here, which is why the spec's IRSA
+# table no longer lists a role for it: the endpoint is a ClusterIP inside the
+# cluster and there is nothing to authenticate to.
+# ---------------------------------------------------------------------------
+#
+# Verified by running grafana/loki:3.7.8 with this exact configuration:
+#   * /ready returns 200 about 17 seconds after start — the readiness probe
+#     below waits longer than that on purpose.
+#   * A pushed line with namespace=petclinic-dev comes back from
+#     /loki/api/v1/query_range with the namespace, pod and container labels
+#     intact, which is the shape the LogQL rules select on.
+#   * /loki/api/v1/rules lists LogErrorSpike, read from
+#     /etc/loki/rules/fake/rules.yaml.
+# ---------------------------------------------------------------------------
+
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: loki-config
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+data:
+  loki.yaml: |
+    # No gateway in front of Loki, so there is no tenant to resolve and no
+    # reason to make callers carry one. Every request becomes tenant `fake`.
+    auth_enabled: false
+
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9096
+      log_level: info
+
+    common:
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          # The ruler's default rule store. `ruler.storage` below overrides the
+          # directory, so this path is written and then not read from — it is
+          # left in place because Loki derives `common.rule_storage` from it,
+          # and removing it makes the ruler fall back to a path under the
+          # container's read-only filesystem.
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        # In-memory ring: there is one process, so there is nothing to
+        # coordinate with. Any other kvstore here would need a second service
+        # to exist for no benefit.
+        kvstore:
+          store: inmemory
+
+    schema_config:
+      configs:
+        # `from` is a date in the past, not the install date. Loki refuses to
+        # start if a schema period begins after the first log line it is asked
+        # to store, so this stays fixed and early.
+        #
+        # tsdb + schema v13 is the current pair for Loki 3.x. The older
+        # boltdb-shipper/v11 combination still works and is what most tutorials
+        # show; it is also what Loki 4 will drop.
+        - from: 2024-01-01
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+
+    limits_config:
+      # 7 days, from the spec's Loki table. Prod runs its own copy at 720h.
+      #
+      # This is the retention Loki *enforces*; without the compactor block
+      # below it would be recorded and then ignored, and the volume would fill
+      # until writes started failing.
+      retention_period: 168h
+
+      # Reject anything older than the retention window. A pod that comes back
+      # after a long outage would otherwise replay a backlog of old lines into
+      # the store, which costs a write and is deleted by the compactor on its
+      # next pass.
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+
+      # Structured metadata is what carries `detected_level` and the other
+      # derived fields the Grafana log browser reads. Off in older 2.x configs.
+      allow_structured_metadata: true
+
+    compactor:
+      working_directory: /loki/compactor
+      retention_enabled: true
+      # Required as soon as retention_enabled is true. The compactor writes a
+      # delete request and then reads it back, and it has to be told which
+      # object store to do that through.
+      delete_request_store: filesystem
+
+    ruler:
+      # Local filesystem storage, read from a directory this container mounts.
+      # The alternative — object storage — is what you would use with more than
+      # one Loki, and is unnecessary for a single binary.
+      storage:
+        type: local
+        local:
+          directory: /etc/loki/rules
+
+      # NOT the rules directory. This is scratch space the ruler writes its own
+      # working files into. Pointing it at /etc/loki/rules instead would make
+      # the ruler write into a read-only ConfigMap mount and fail on the first
+      # sync; confusing the two is why a ruler with rules in the right place
+      # sometimes reports none.
+      rule_path: /loki/rules-temp
+
+      # Same Alertmanager as Prometheus, so a log alert and a metric alert land
+      # in one place with one routing tree. The name is the fully qualified
+      # form because Loki is not in the same namespace.
+      alertmanager_url: http://alertmanager.monitoring.svc.cluster.local:9093
+
+      ring:
+        kvstore:
+          store: inmemory
+
+      # Exposes /loki/api/v1/rules, which is how the loaded rule set is checked
+      # without reading the ConfigMap back.
+      enable_api: true
+
+---
+# ===========================================================================
+# The server
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: loki
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  # One, and only one — see the header. The volume is ReadWriteOnce and the
+  # single-binary ring has no notion of a peer.
+  replicas: 1
+
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loki
+        app.kubernetes.io/part-of: petclinic
+        app.kubernetes.io/managed-by: kubectl
+        app.kubernetes.io/component: observability
+
+    spec:
+      securityContext:
+        # The grafana/loki image declares uid 10001. fsGroup is what makes the
+        # EBS volume writable by it — without it /loki mounts root-owned and
+        # Loki fails on its own chunk directory.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+
+      containers:
+        - name: loki
+
+          image: grafana/loki:3.7.8
+
+          args:
+            - -config.file=/etc/loki/loki.yaml
+
+          ports:
+            - name: http
+              containerPort: 3100
+              protocol: TCP
+            - name: grpc
+              containerPort: 9096
+              protocol: TCP
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+
+            # Mounted at the tenant directory, not at /etc/loki/rules. The
+            # ConfigMap's single key is rules.yaml, so this places it at
+            # /etc/loki/rules/fake/rules.yaml — the one path the ruler reads.
+            # Mounting one level up would put it at /etc/loki/rules/rules.yaml,
+            # where the ruler looks for a tenant directory called `rules` and
+            # finds none.
+            - name: rules
+              mountPath: /etc/loki/rules/fake
+
+            - name: data
+              mountPath: /loki
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            # Measured at ~53s from container start on a real cluster (k3s,
+            # local-path storage). The ~17s this comment used to quote was a
+            # bare container with nothing else running — the pod is the number
+            # that matters. 30 is deliberately below it: readiness failing is
+            # harmless, and a short delay is what makes the pod report Ready as
+            # soon as it genuinely is.
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
+          livenessProbe:
+            # Loki exposes no separate liveness endpoint; /ready is the only
+            # signal it has.
+            #
+            # 180, not the 90 this started as, and the reason is arithmetic
+            # rather than caution. The readiness comment above budgets for a
+            # cold EBS attach on top of a ~53s start; liveness has to budget
+            # for the same thing and did not — 90 + 3x20 = 150s, only ~2.8x the
+            # measured start. A slower start would have killed a healthy Loki
+            # mid-boot and begun the loop again. 180 + 3x20 = 240s clears the
+            # measured start with room to spare, and the cost of waiting too
+            # long is a slower restart of a process that is genuinely stuck,
+            # which is the cheaper of the two mistakes.
+            #
+            # /ready going green does NOT wait on the compactor: the log line
+            # "waiting 10m0s for ring to stay stable" is printed while /ready
+            # already answers 200. Do not raise these to cover it.
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 20
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+
+        - name: rules
+          configMap:
+            name: loki-rules
+
+        - name: data
+          persistentVolumeClaim:
+            claimName: loki-data
+
+---
+# ===========================================================================
+# Service
+#
+# http://loki.monitoring:3100 is the address both consumers use: FluentBit
+# writes to it and Grafana reads from it. The datasource UID in grafana.yaml is
+# pinned so that the dashboard JSON in PETPLAT-57 keeps resolving to this.
+# ===========================================================================
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: loki
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: loki
+
+  ports:
+    - name: http
+      port: 3100
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: 9096
+      targetPort: grpc
+      protocol: TCP
+
+---
+# ===========================================================================
+# Storage — 10Gi dev / 50Gi prod, from the spec's Loki table
+# ===========================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+
+metadata:
+  name: loki-data
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  accessModes:
+    - ReadWriteOnce
+
+  storageClassName: gp3
+
+  resources:
+    requests:
+      storage: 10Gi

@@ -1,0 +1,470 @@
+# grafana.yaml — Grafana: the read side of the stack
+#
+# PETPLAT-56 (deployment and the two datasources) and PETPLAT-57 (the dashboard
+# set). Everything here is provisioning: nothing is configured through the UI,
+# and nothing configured in the UI survives.
+#
+# Values from docs/technical-spec.md → "Observability" → "Grafana":
+#   namespace monitoring · datasources Prometheus + Loki, auto-configured
+#   storage PersistentVolume (EBS, 5Gi) · admin credentials K8s Secret
+#   dashboards provisioned via ConfigMap
+#
+# ---------------------------------------------------------------------------
+# The datasource UIDs are pinned, and that is the whole reason this file works
+#
+# `uid: prometheus` and `uid: loki` are written into the provisioning below, and
+# every dashboard in grafana-dashboards/ refers to them by those exact strings:
+#
+#     "datasource": { "type": "prometheus", "uid": "prometheus" }
+#
+# Leave the uids out and Grafana generates a random one per datasource on first
+# start. The dashboards still load, every panel still renders — as "No Data" —
+# and the only clue is in the panel's query editor, where the datasource
+# resolves to nothing. Pinning them is what makes the dashboards portable: the
+# same JSON works on a rebuilt cluster, because the uid is a constant rather
+# than something assigned at install time.
+#
+# ---------------------------------------------------------------------------
+# Dashboards come from ConfigMaps, and the ConfigMap is generated from files
+#
+# The JSON lives in grafana-dashboards/ as files, which is what PETPLAT-57 asks
+# for and what a reviewer can read. The ConfigMap that Grafana actually mounts
+# is built from that directory, so the files are the only copy:
+#
+#     kubectl create configmap grafana-dashboards -n monitoring \
+#       --from-file=k8s/base/observability/grafana-dashboards/ \
+#       --dry-run=client -o yaml | kubectl apply -f -
+#
+# `--dry-run=client -o yaml | kubectl apply -f -` rather than a bare
+# `kubectl create configmap`, so the command is idempotent: a plain create
+# fails with AlreadyExists on the second run, which is the wrong thing to have
+# to remember during a redeploy. The `--from-file` form keys each dashboard by
+# its filename, which is how the provider below finds them.
+#
+# This is the one object in the stack that `kubectl apply -f k8s/base/observability/`
+# does not create — a ConfigMap cannot be built from a directory by a manifest.
+# Applying the directory without this command leaves Grafana running with an
+# empty dashboards folder and no error anywhere; it logs one line about a
+# missing ConfigMap volume and starts anyway.
+#
+# ---------------------------------------------------------------------------
+# The admin password is a Secret, and its absence is not fatal
+#
+# `optional: true` on the key ref, the same pattern alertmanager.yaml uses for
+# its webhook. With the Secret absent, the env var is simply unset and Grafana
+# falls back to its documented default of admin/admin with a forced password
+# change on first login. With it present, that fallback never applies.
+#
+#     kubectl create secret generic grafana-admin -n monitoring \
+#       --from-literal=admin-password='<password>'
+#
+# An ExternalSecret is not an option here for the same reason it is not one in
+# alertmanager.yaml: the ClusterSecretStore's namespaceRegexes cover
+# petclinic-dev and petclinic-prod only, and widening them to reach `monitoring`
+# would hand every pod in this namespace the RDS master password.
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# The two datasources
+# ===========================================================================
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+data:
+  # The filename is not arbitrary — the Deployment mounts this ConfigMap at
+  # /etc/grafana/provisioning/datasources, and Grafana reads every .yaml file in
+  # that directory. Any name works as long as it ends in .yaml.
+  datasources.yaml: |
+    # Grafana 13 still provisions datasources with apiVersion 1. This is not the
+    # same apiVersion as a Kubernetes object — it is Grafana's own provisioning
+    # schema, and it has been 1 since datasource provisioning was introduced.
+    apiVersion: 1
+
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        # Pinned. See the header — this string is what every dashboard's panel
+        # refers to, and Grafana would otherwise invent one.
+        uid: prometheus
+
+        # http://prometheus:9090 from the spec, and reachable because both are
+        # in `monitoring`: a one-label name resolves inside its own namespace.
+        url: http://prometheus:9090
+
+        # proxy, not direct: Grafana's server makes the request rather than the
+        # browser. Direct would require the browser to reach a ClusterIP, which
+        # it cannot.
+        access: proxy
+
+        # The default datasource is the one a new panel picks with no explicit
+        # choice. Prometheus, because most panels are metric panels.
+        isDefault: true
+
+        # Read-only from the UI. The provisioned definition is the source of
+        # truth; an edit in the UI would be lost on the next restart, which is
+        # worse than not being allowed to make it.
+        editable: false
+
+        jsonData:
+          # Must match the scrape interval in prometheus.yaml. Grafana uses this
+          # to pick a sensible default step for a range query, and a value below
+          # the real scrape interval produces panels that interpolate between
+          # samples that do not exist.
+          timeInterval: 15s
+
+      - name: Loki
+        type: loki
+        uid: loki
+
+        url: http://loki:3100
+        access: proxy
+        editable: false
+
+        jsonData:
+          # Caps how many log lines a query returns to the browser. Loki will
+          # happily return far more than a panel can render, and the default
+          # is high enough that a broad selector can stall the UI.
+          maxLines: 1000
+
+---
+# ===========================================================================
+# The dashboard provider
+#
+# Grafana has two levels of provisioning for dashboards and both are needed:
+# this file tells it WHERE to look and how to behave, and the dashboards
+# ConfigMap is what it finds there. Provisioning the dashboards without a
+# provider leaves them unread on disk.
+# ===========================================================================
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: grafana-dashboard-provider
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+data:
+  provider.yaml: |
+    apiVersion: 1
+
+    providers:
+      - name: petclinic
+
+        # The folder the dashboards appear under in Grafana's UI. Without it
+        # they land in the root and mix with anything created by hand.
+        folder: Petclinic
+
+        type: file
+
+        # How often Grafana re-reads the directory. A ConfigMap update is
+        # visible in the UI within this window without restarting the pod —
+        # which is the point of provisioning from files rather than importing
+        # through the API.
+        updateIntervalSeconds: 30
+
+        # A dashboard deleted from the UI is restored from the file on the next
+        # scan rather than staying deleted. That is the GitOps direction: the
+        # file is the source of truth.
+        disableDeletion: false
+
+        # Edits made in the UI are not saved. They would be discarded on the
+        # next restart anyway, because the file has not changed; refusing them
+        # up front is clearer than silently losing them.
+        allowUiUpdates: false
+
+        options:
+          path: /var/lib/grafana/dashboards
+
+          # The directory is flat — every JSON file is a dashboard, and none of
+          # them is a folder. Turning this on would make a subdirectory into a
+          # folder, and there are none.
+          foldersFromFilesStructure: false
+
+---
+# ===========================================================================
+# The server
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: grafana
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  replicas: 1
+
+  strategy:
+    # Recreate. Grafana's SQLite database and its session store live on a
+    # ReadWriteOnce volume, so a rolling update would leave the new pod waiting
+    # on a volume the old one has not released.
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/part-of: petclinic
+        app.kubernetes.io/managed-by: kubectl
+        app.kubernetes.io/component: observability
+
+    spec:
+      # Grafana reads provisioning files and queries two ClusterIPs. It never
+      # calls the Kubernetes API.
+      automountServiceAccountToken: false
+
+      securityContext:
+        # The grafana/grafana image declares uid 472. fsGroup is what makes the
+        # EBS volume writable by it — /var/lib/grafana is where the SQLite
+        # database is created, and without this the volume mounts root-owned and
+        # Grafana exits on a database it cannot open.
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+
+      containers:
+        - name: grafana
+
+          image: grafana/grafana:13.2.4
+
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+
+            # From the Secret when it exists, unset when it does not — see the
+            # header. `optional: true` is what keeps a missing Secret from
+            # leaving this pod in CreateContainerConfigError.
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-admin
+                  key: admin-password
+                  optional: true
+
+            # No self-service sign-up. The default is already false; set here
+            # so it does not depend on a default that could change.
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+
+            # Anonymous access stays off, which is the more restrictive of the
+            # two options and the one the spec implies by naming admin
+            # credentials. Turning it on with role Viewer is what you would do
+            # to put this behind an Ingress for a demo; there is no Ingress
+            # here, so the only way in is port-forward, and that already
+            # requires cluster credentials.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "false"
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/grafana/grafana.ini
+              subPath: grafana.ini
+              readOnly: true
+
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+              readOnly: true
+
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+              readOnly: true
+
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+              readOnly: true
+
+            - name: data
+              mountPath: /var/lib/grafana
+
+          # /api/health reports the database and, with ?full, the datasources.
+          # The plain form is used here: it answers "is this process able to
+          # serve" without making readiness depend on Prometheus being up. A
+          # Grafana that cannot reach Prometheus still renders its UI and its
+          # provisioning, and taking it out of the Service would not help.
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+      volumes:
+        # An empty ConfigMap that only exists to carry the subPath mount above.
+        # Grafana reads /etc/grafana/grafana.ini from the image; mounting an
+        # empty file over it is a no-op, and the alternative — leaving the
+        # mount out — means every setting has to come from a GF_ env var.
+        #
+        # This is deliberately NOT a settings file. Putting grafana.ini here
+        # would split configuration between a file and the env block above,
+        # with no rule about which wins; the env vars are all in one place.
+        - name: config
+          configMap:
+            name: grafana-config
+
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+
+        # Created out of band — see the header for the command. `optional: true`
+        # so that a cluster where that command has not been run still starts
+        # Grafana, with an empty dashboards folder, rather than leaving the pod
+        # stuck on a missing ConfigMap.
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+            optional: true
+
+        - name: data
+          persistentVolumeClaim:
+            claimName: grafana-data
+
+---
+# ===========================================================================
+# The (empty) grafana.ini
+#
+# Present only so the subPath mount above has something to point at. All real
+# configuration is in the env block.
+# ===========================================================================
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: grafana-config
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+data:
+  grafana.ini: |
+    ; Intentionally empty. Every setting this deployment needs is set through a
+    ; GF_ environment variable in the Deployment, so there is one place to look.
+    ;
+    ; This file exists because the Deployment mounts it over the image's own
+    ; /etc/grafana/grafana.ini. See the volumes comment for why that is a no-op
+    ; rather than a second source of configuration.
+
+---
+# ===========================================================================
+# Service
+#
+# No Ingress, for the same reason Prometheus has none: the platform's only
+# public entry point is the ALB in front of api-gateway (ADR-0001). The UI is
+# reached by port-forward:
+#
+#     kubectl port-forward -n monitoring svc/grafana 3000:3000
+#     open http://localhost:3000
+# ===========================================================================
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: grafana
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: grafana
+
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP
+
+---
+# ===========================================================================
+# Storage — 5Gi, from the spec's Grafana table
+#
+# This holds Grafana's SQLite database: users, organisations, preferences,
+# sessions and API keys. Not dashboards — those come from the ConfigMap above,
+# and a dashboard created in the UI is not written here because
+# allowUiUpdates is false.
+#
+# It is worth having anyway: without it Grafana runs on an emptyDir, and every
+# pod restart logs everyone out and loses the admin password change.
+# ===========================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+
+metadata:
+  name: grafana-data
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  accessModes:
+    - ReadWriteOnce
+
+  storageClassName: gp3
+
+  resources:
+    requests:
+      storage: 5Gi

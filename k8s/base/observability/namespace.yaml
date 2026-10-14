@@ -1,0 +1,113 @@
+# namespace.yaml — the two namespaces the observability stack lives in
+#
+# PETPLAT-55 … PETPLAT-60. `monitoring` holds Prometheus, Alertmanager, Grafana,
+# Loki, kube-state-metrics and the FluentBit DaemonSet. `tracing` holds Zipkin.
+#
+# ---------------------------------------------------------------------------
+# Why Zipkin gets its own namespace
+#
+# Not tidiness — it is what the application services resolve. Every traced
+# service sends spans to http://zipkin.tracing:9411, a two-label DNS name whose
+# second label is the namespace. Zipkin in `monitoring` would answer at
+# zipkin.monitoring:9411, and every service would keep posting to a name that
+# does not resolve: the tracing libraries would load, the spans would be built,
+# and the export would fail into a log line nobody reads. The namespace is part
+# of the contract, so it is fixed here.
+# ---------------------------------------------------------------------------
+#
+# Why these are here and not in k8s/base/namespaces.yaml
+#
+# k8s/base/namespaces.yaml holds the two APPLICATION namespaces — petclinic-dev
+# and petclinic-prod, the ones the Helm releases deploy into and the ones the
+# Helm chart's templates name. These two are not application namespaces: nothing
+# is deployed into them by ArgoCD, and they are created and torn down with the
+# observability stack itself. Keeping them beside that stack means one
+# `kubectl apply -f k8s/base/observability/` brings up a namespace and
+# everything in it, and a teardown has one directory to look in.
+#
+# k8s/base/external-secrets/namespace.yaml follows the same rule for the same
+# reason: the namespace lives with the thing it belongs to.
+# ---------------------------------------------------------------------------
+#
+# Pod Security Admission: the two namespaces get DIFFERENT levels, and the
+# difference is forced by one workload.
+#
+# `monitoring` — enforce: privileged
+#
+#   FluentBit mounts the node's /var/log through a hostPath volume, because
+#   that is the only way to read container logs off a node; there is no
+#   projected or CSI volume that exposes them. `hostPath` is a **baseline**
+#   control, not a restricted one:
+#
+#       HostPath Volumes — "HostPath volumes must be forbidden."
+#       Restricted Fields: spec.volumes[*].hostPath · Allowed Values: Undefined/nil
+#
+#   so `enforce: baseline` would reject the DaemonSet at admission, not merely
+#   warn about it. There is no level between "no enforcement" and "no hostPath",
+#   and no per-pod exemption — PSA is a namespace label, so the namespace has to
+#   be the thing that gives way. `privileged` is the label that means "enforce
+#   nothing here"; it is a statement about this namespace, not about any pod in
+#   it, and every workload in it is still held to restricted by warn and audit.
+#
+#   The tidier alternative is a third namespace — FluentBit in `logging` with
+#   enforce: privileged, `monitoring` left at restricted. That is the better
+#   shape for a stack where the log shipper is the most privileged thing in it,
+#   and it is a one-line change if this ever needs tightening: move the
+#   DaemonSet, its RBAC and its ConfigMap, and set this label back to restricted.
+#   It is not done here because it splits the stack across three namespaces to
+#   buy enforcement the warn and audit labels already report on.
+#
+# `tracing` — enforce: restricted
+#
+#   One workload, and it complies. The openzipkin/zipkin image runs as uid 1000
+#   (`zipkin`), not root as its reputation suggests — checked against
+#   openzipkin/zipkin:3, and the pod spec in zipkin.yaml sets the four things
+#   restricted asks for on top of that (runAsNonRoot, allowPrivilegeEscalation
+#   false, capabilities drop ALL, seccompProfile RuntimeDefault). Verified by
+#   running that image with the equivalent context: it starts, /health returns
+#   200, POST /api/v2/spans returns 202, and CapEff reads 0000000000000000.
+#
+#   Its volumes are a configMap and an emptyDir, both of which the restricted
+#   policy's allowed volume list permits. Nothing here needs hostPath.
+#
+# warn and audit stay at restricted on both, so a workload that would fail
+# restricted is reported on every apply rather than hidden behind whatever the
+# enforced level happens to allow.
+# ---------------------------------------------------------------------------
+
+apiVersion: v1
+kind: Namespace
+
+metadata:
+  name: monitoring
+
+  labels:
+    app.kubernetes.io/name: monitoring
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+    # See the header: FluentBit's hostPath volume is a baseline control, so this
+    # cannot be baseline or restricted.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+
+---
+apiVersion: v1
+kind: Namespace
+
+metadata:
+  name: tracing
+
+  labels:
+    app.kubernetes.io/name: tracing
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+    # Zipkin complies — see the header. This is the strictest of the three PSA
+    # levels and the only namespace in the platform that enforces it.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

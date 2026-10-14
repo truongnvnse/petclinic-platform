@@ -57,6 +57,27 @@ configMap:
     # startup if anything bound them — but the Azure starter is commented out in
     # the module's pom.xml, so the spring.ai.azure.* block is never bound and the
     # placeholders are never resolved.
+
+    # Tracing — same two variables, and the same caveat, as api-gateway.yaml,
+    # where the reasoning is written out in full. In short:
+    #
+    #  * MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT, not the spec's
+    #    MANAGEMENT_ZIPKIN_TRACING_ENDPOINT. The spec's name binds to
+    #    `management.zipkin.tracing.endpoint`, which Spring Boot removed in 3.2 —
+    #    in spring-boot-zipkin-4.1.1 it survives only as a hand-written metadata
+    #    entry with `type=None`, so nothing binds it and setting it does nothing
+    #    at all.
+    #  * http://zipkin.tracing:9411/api/v2/spans, because the config repo's
+    #    `tracing-server` name is a docker-compose container name that resolves
+    #    only inside one namespace. This Service is `zipkin` in `tracing`.
+    #  * 1.0, because the default 0.1 samples one request in ten and makes a
+    #    working setup look broken.
+    #
+    # Worth noting here more than elsewhere: genai-service is WebFlux, and its
+    # spans carry the reactive chain. A trace through api-gateway → genai-service
+    # is the one that shows the OpenAI round-trip as its own span.
+    MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT: http://zipkin.tracing:9411/api/v2/spans
+    MANAGEMENT_TRACING_SAMPLING_PROBABILITY: "1.0"
 resources:
   requests:
     cpu: 100m

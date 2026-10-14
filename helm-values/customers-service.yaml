@@ -63,6 +63,40 @@ configMap:
     # rather than inline keeps the check out of a string that `toYaml` may fold
     # across lines, which a template action cannot survive.
     SPRING_DATASOURCE_URL: "{{ .Values.database.connectionString }}"
+
+    # ---------------------------------------------------------------------
+    # Tracing. Both variables are needed, and the first one is NOT the name the
+    # spec gives — see below, it is worth reading before changing it back.
+    #
+    # MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT — the spec calls this variable
+    # MANAGEMENT_ZIPKIN_TRACING_ENDPOINT. That name binds to
+    # `management.zipkin.tracing.endpoint`, which Spring Boot removed in 3.2. In
+    # spring-boot-zipkin-4.1.1 the property exists only in
+    # additional-spring-configuration-metadata.json — the hand-written metadata
+    # file — with `type=None` and `deprecation.level=error`. Properties generated
+    # from a real class always carry a type, so `type=None` means no field binds
+    # it. The live property is `management.tracing.export.zipkin.endpoint`, and
+    # the variable below is its environment-variable form.
+    #
+    # Setting the spec's name is silent: no error, no warning, and spans posted
+    # to the config repo's default of http://localhost:9411/api/v2/spans, which
+    # in a pod is nothing at all.
+    #
+    # http://zipkin.tracing:9411/api/v2/spans, not the config repo's
+    # http://tracing-server:9411/api/v2/spans: `tracing-server` is the
+    # docker-compose container name and resolves only within one namespace.
+    # Zipkin here is a Service named `zipkin` in the `tracing` namespace, so the
+    # two-label name is the one that resolves. An environment variable outranks
+    # config data, and a config server served through spring.config.import is
+    # config data — so this value beats the repo's.
+    #
+    # 1.0, not the default 0.1: at 10% sampling a demo has to be refreshed
+    # several times before one trace appears, which reads as "tracing is
+    # broken". At 1.0 every request is traced. The cost is span volume — the
+    # thing to revisit if this ever runs under real traffic.
+    # ---------------------------------------------------------------------
+    MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT: http://zipkin.tracing:9411/api/v2/spans
+    MANAGEMENT_TRACING_SAMPLING_PROBABILITY: "1.0"
 resources:
   requests:
     cpu: 100m

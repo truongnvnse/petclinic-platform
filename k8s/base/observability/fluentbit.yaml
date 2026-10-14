@@ -1,0 +1,384 @@
+# fluentbit.yaml — FluentBit: the log collector on every node
+#
+# PETPLAT-59. A DaemonSet, one pod per node, tailing that node's container logs
+# and shipping them to Loki. Nothing else in the platform reads logs from disk.
+#
+# Values from docs/technical-spec.md → "Observability" → "FluentBit (Logging)":
+#   DaemonSet on all nodes · output Loki at http://loki.monitoring:3100
+#   log labels namespace, pod, container · no auth, no IAM role
+#
+# ---------------------------------------------------------------------------
+# No IRSA, and no ServiceAccount annotation
+#
+# The spec's IRSA table no longer lists a role for FluentBit, and this manifest
+# matches: Loki is a ClusterIP in the same cluster, so there is nothing to
+# authenticate to and no AWS API in the path. The ServiceAccount below exists
+# only because the `kubernetes` filter calls the Kubernetes API to look up pod
+# metadata — it needs a token, not a role.
+#
+# This is the one place where an earlier design would have had a role: the
+# obvious alternative was CloudWatch Logs, which would have needed an IRSA role
+# and an AWS API endpoint. Sending to Loki keeps the whole log path inside the
+# cluster.
+# ---------------------------------------------------------------------------
+#
+# Where the labels come from
+#
+# The `kubernetes` filter reads each pod's metadata from the API and attaches
+# namespace_name, pod_name and container_name to the record. The output then
+# promotes those three to Loki stream labels. That promotion is the whole point:
+# a Loki stream label is what makes a query cheap, and the LogQL alert rules in
+# alerting-rules.yaml select on `namespace`, so a record that arrives without it
+# is invisible to them.
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# RBAC — read pod metadata, nothing else
+# ===========================================================================
+apiVersion: v1
+kind: ServiceAccount
+
+metadata:
+  name: fluent-bit
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+
+metadata:
+  name: fluent-bit
+
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+rules:
+  # pods, for the metadata the filter attaches; namespaces, for the namespace
+  # object behind namespace_name. Read-only, cluster-wide — a DaemonSet tails
+  # every namespace by definition, so a namespaced Role could not express this.
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+
+metadata:
+  name: fluent-bit
+
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit
+
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: monitoring
+
+---
+# ===========================================================================
+# Configuration
+#
+# Classic INI rather than YAML: Fluent Bit 5 accepts both, and INI is what every
+# Fluent Bit example and every troubleshooting answer on the internet is written
+# in. Matching that is worth more here than matching the rest of this directory.
+#
+# Editing this ConfigMap does NOT restart the DaemonSet — there is no checksum
+# annotation (that is a Helm idiom and these manifests are applied by hand) and
+# no config-reloader sidecar, so a changed fluent-bit.conf keeps running the old
+# configuration until the pod restarts. After any edit here:
+#
+#   kubectl rollout restart daemonset/fluent-bit -n monitoring
+#
+# Prometheus has the equivalent step written out next to --web.enable-lifecycle
+# in prometheus.yaml; this is the same trap in a place where there is no reload
+# endpoint to fall back on.
+# ===========================================================================
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: fluent-bit-config
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush             5
+        Log_Level         info
+        Daemon            off
+        # The image's own parsers, not a copy. This is why the ConfigMap is
+        # mounted at /fluent-bit/etc/conf rather than at /fluent-bit/etc — see
+        # the volumeMounts note in the DaemonSet below.
+        Parsers_File      /fluent-bit/etc/parsers.conf
+
+        # The health endpoint the probes below call. 2020 is the convention.
+        HTTP_Server       On
+        HTTP_Listen       0.0.0.0
+        HTTP_Port         2020
+
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*.log
+        # /var/log/containers holds symlinks into /var/log/pods, one per
+        # container. Both live under the single /var/log hostPath mount below,
+        # which is why only that one path is mounted.
+        #
+        # docker, cri: the container runtime frames every log line with a
+        # timestamp and a stream tag. Without a multiline parser the tail input
+        # hands Loki the raw framing as part of the message, and every line
+        # gains a timestamp prefix that makes `|= "ERROR"` unreliable at the
+        # start of a line. Java stack traces still arrive as separate records —
+        # a `java` multiline parser is the fix if that ever matters.
+        multiline.parser  docker, cri
+        Tag               kube.*
+        Mem_Buf_Limit     5MB
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+        # Position tracking, so a restarted pod resumes rather than re-shipping
+        # every line it has already sent. On the hostPath because an emptyDir
+        # would be empty after exactly the restart it exists to survive.
+        DB                /var/log/flb_kube.db
+
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix     kube.var.log.containers.
+        # Application logs that are already JSON are parsed and merged into the
+        # record, so a structured field becomes a queryable key instead of a
+        # string inside the message. Keep_Log Off drops the original, leaving
+        # one copy of the message rather than two.
+        Merge_Log           On
+        Merge_Log_Key       log_processed
+        Keep_Log            Off
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude Off
+        # Labels On is what attaches namespace_name, pod_name and container_name.
+        # Annotations stays Off: the ALB controller writes large annotations on
+        # its own resources and nothing here queries them.
+        Labels              On
+        Annotations         Off
+
+    [FILTER]
+        # Break the feedback loop. FluentBit runs in `monitoring`, so its own
+        # container logs are on the same node it is tailing, and an error about
+        # shipping to Loki would be shipped to Loki — which is a loop that grows
+        # for as long as the error lasts. Excluding by pod name rather than by
+        # namespace keeps Loki's and Prometheus's own logs searchable.
+        #
+        # $kubernetes['pod_name'], not the bare pod_name, for the same reason as
+        # the Labels line in the OUTPUT section below: the kubernetes filter
+        # nests everything it adds under a `kubernetes` object, so a bare key
+        # names a field that does not exist and the rule matches nothing. This
+        # one was caught by its absence — with the bare form, fluent-bit's own
+        # "[engine] flush chunk ... output=loki.0" lines were arriving in Loki,
+        # which is precisely the loop this filter exists to prevent.
+        Name                grep
+        Match               kube.*
+        Exclude             $kubernetes['pod_name'] ^fluent-bit
+
+    [OUTPUT]
+        Name                loki
+        Match               kube.*
+        # The `loki` output plugin is built into the standard Fluent Bit image
+        # since 1.9, so there is no plugin to install and no init container to
+        # fetch one. The separate grafana/fluent-bit-plugin-loki image is a
+        # different, older thing and is not needed.
+        #
+        # `loki.monitoring` is http://loki.monitoring:3100 from the spec, split
+        # into the host and port keys the plugin takes. The short name resolves
+        # through the pod's own search domains, so it works from any namespace.
+        Host                loki.monitoring
+        Port                3100
+
+        # The three labels the spec names, promoted from the filter's fields to
+        # Loki stream labels. `job` is added so a query can separate these
+        # streams from anything else writing to the same Loki.
+        #
+        # The accessor form is not decoration. The kubernetes filter nests what
+        # it adds, so a shipped record reads
+        # {"log":"...","kubernetes":{"pod_name":"...","namespace_name":"..."}}
+        # and a bare `$namespace_name` names a top-level key that does not
+        # exist. It fails silently: the stream still arrives, carrying only
+        # `job`, and the LogQL rules in alerting-rules.yaml select on
+        # {namespace=~"petclinic-.*"} and therefore match nothing at all.
+        # Measured against Loki with the bare form, /loki/api/v1/labels
+        # returned ["job"] while the ruler reported both rules evaluating
+        # successfully — success against an empty result set.
+        Labels              job=fluentbit, namespace=$kubernetes['namespace_name'], pod=$kubernetes['pod_name'], container=$kubernetes['container_name']
+
+        Line_Format         json
+        # Never give up. The default is 5 retries, after which records are
+        # dropped silently — a short Loki restart would lose logs with nothing
+        # in either system to say so.
+        Retry_Limit         False
+
+    # =======================================================================
+    # What this does NOT do
+    #
+    # No CloudWatch output and no stdout output. Both would be valid designs;
+    # the spec picks Loki, and sending logs to two places would double the cost
+    # of the pipeline and leave the two disagreeing about retention.
+    #
+    # No `auto_kubernetes_labels`. It would promote every pod label into a Loki
+    # stream label, and stream cardinality is what makes Loki expensive: the
+    # Helm chart puts a release revision on every pod, so every rollout would
+    # create a new stream for every pod.
+    # =======================================================================
+
+---
+# ===========================================================================
+# The DaemonSet
+# ===========================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+
+metadata:
+  name: fluent-bit
+  namespace: monitoring
+
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: observability
+
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fluent-bit
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fluent-bit
+        app.kubernetes.io/part-of: petclinic
+        app.kubernetes.io/managed-by: kubectl
+        app.kubernetes.io/component: observability
+
+    spec:
+      serviceAccountName: fluent-bit
+
+      # No tolerations. The EKS managed node group runs no taints, so the
+      # DaemonSet already lands on every node that can run application pods —
+      # which is every node the logs come from. A toleration for the control
+      # plane would be dead config: EKS does not expose those nodes, and the
+      # control-plane logs are not on this filesystem anyway.
+      #
+      # If a tainted node group is ever added, a matching toleration is required
+      # here or its logs stop arriving with no error anywhere — the DaemonSet
+      # simply has no pod on that node.
+
+      # The node's log directory. Mounted read-write rather than read-only
+      # because of the `DB` file above; the container has no reason to write
+      # anything else there.
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+
+        - name: config
+          configMap:
+            name: fluent-bit-config
+
+      containers:
+        - name: fluent-bit
+
+          # Pinned, and multi-arch: the nodes are Graviton (arm64) and this
+          # image publishes linux/arm64. A tag without an arm64 build would
+          # crash-loop with an exec format error rather than fail to pull.
+          image: cr.fluentbit.io/fluent/fluent-bit:5.0.11
+
+          args:
+            - -c
+            - /fluent-bit/etc/conf/fluent-bit.conf
+
+          ports:
+            - name: http
+              containerPort: 2020
+              protocol: TCP
+
+          volumeMounts:
+            # Mounted at /fluent-bit/etc/conf, NOT at /fluent-bit/etc. The
+            # image keeps parsers.conf and plugins.conf in /fluent-bit/etc, and
+            # a ConfigMap mounted there would shadow both — the SERVICE section
+            # above names /fluent-bit/etc/parsers.conf, so the container would
+            # fail to start. Mounting a subdirectory avoids that entirely and,
+            # unlike a subPath file mount, still picks up ConfigMap edits.
+            - name: config
+              mountPath: /fluent-bit/etc/conf
+
+            - name: varlog
+              mountPath: /var/log
+
+          # NOT /api/v1/health, which is the path Fluent Bit's own endpoint
+          # table lists and the one this manifest used first. On this image it
+          # is a 404: measured against fluent-bit:5.0.11, /api/v1/health and
+          # /healthz both answer 404 while /, /api/v1/uptime, /api/v1/metrics and
+          # /api/v2/health all answer 200. A 404 is not a warning to liveness —
+          # it restarted this container twice before the cause was found, which
+          # presents as a crash-loop with no crash in the logs.
+          #
+          # The two probes ask different questions on purpose:
+          #
+          #   readiness -> /api/v2/health reports pipeline health
+          #     ({"status":"ok","errors":0,"retries_failed":0,...}) and returns
+          #     500 once retries against Loki pass error_limit. That is the
+          #     signal worth acting on.
+          #
+          #   liveness -> /api/v1/uptime answers 200 as soon as the HTTP server
+          #     is listening and never looks at the output path. If liveness
+          #     used /api/v2/health instead, a Loki outage would flip the health
+          #     status to error and liveness would restart the one component
+          #     whose job is to keep buffering through that outage — discarding
+          #     the in-memory buffer and turning a recoverable logging gap into
+          #     lost logs.
+          readinessProbe:
+            httpGet:
+              path: /api/v2/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /api/v1/uptime
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+
+          resources:
+            # Small on purpose: this process tails files and forwards them. Its
+            # footprint tracks the number of containers per node, not traffic.
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi

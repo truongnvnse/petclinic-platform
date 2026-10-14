@@ -1,0 +1,59 @@
+# storageclass.yaml — the gp3 class the three observability claims bind to
+#
+# Cluster-scoped, not namespaced: a StorageClass is a cluster-wide template.
+# Naming one here is what lets the Prometheus, Grafana and Loki claims each ask
+# for a volume without repeating the provisioner details three times.
+#
+# ---------------------------------------------------------------------------
+# Why this file exists at all
+#
+# The cluster has no default StorageClass. The aws-ebs-csi-driver add-on
+# installs the driver but no class, and EKS does not mark the legacy `gp2` class
+# default — so a claim that names no class stays Pending forever with the event
+# `no storage class is set`. That failure is recorded in
+# docs/eks-operations.md → Troubleshooting, and it is why all three PVCs in this
+# directory name `gp3` explicitly instead of relying on a default.
+#
+# This is also the first PersistentVolumeClaim in the repository, which is why
+# the class is defined here rather than somewhere more obviously central. If a
+# second component ever needs storage, this file should move to a directory of
+# its own rather than be copied.
+# ---------------------------------------------------------------------------
+#
+# Deliberately NOT the default class. `storageclass.kubernetes.io/is-default-class`
+# would silently change how every future claim in the cluster provisions, and
+# that is a cluster-wide decision rather than this stack's to make.
+# ---------------------------------------------------------------------------
+#
+# gp3 rather than gp2: cheaper per GB, and the only one of the two whose volumes
+# are encrypted at the class level rather than depending on the account setting.
+# `encrypted: "true"` is what satisfies the project's "encryption everywhere"
+# rule here, with the account's EBS encryption-by-default as the second layer.
+#
+# WaitForFirstConsumer rather than Immediate: an EBS volume is created in one
+# availability zone and can only ever attach to a node in that same zone.
+# Binding at claim time chooses a zone before any pod exists, and can choose one
+# the scheduler then cannot place the pod in. Waiting for the consumer lets the
+# scheduler pick the node first, and the volume is created in that node's zone.
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+
+metadata:
+  name: gp3
+
+  labels:
+    app.kubernetes.io/part-of: petclinic
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/component: infrastructure
+
+provisioner: ebs.csi.aws.com
+
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+
+parameters:
+  type: gp3
+  encrypted: "true"
+  fsType: ext4
