@@ -104,10 +104,27 @@ module "eks" {
 
   # Not the spec's ["t4g.small"] — see the sizing note above the module call.
   # 17 pods/node and 4 GiB instead of 11 and 2 GiB, at the same 2 vCPU.
+  #
+  # Three nodes, not two, since the observability stack landed. A t4g.medium
+  # tops out at 17 pods — the ENI address ceiling, not CPU or memory — and the
+  # cluster was already at 34/34 with the eight services, ArgoCD, External
+  # Secrets and the kube-system add-ons. Prometheus, Loki, kube-state-metrics
+  # and Zipkin then had nowhere to schedule and sat Pending while the rest of
+  # the stack came up.
+  #
+  # The alternative was ENABLE_PREFIX_DELEGATION on the vpc-cni add-on, which
+  # lifts the ceiling to ~110 pods/node for free. Chosen against here because it
+  # is a cluster-wide networking change — the aws-node DaemonSet restarts and
+  # every new pod draws its address from a delegated prefix — and a third node
+  # is the reversible option: set this back to 2 and the node drains away.
+  #
+  # min_size stays 2 so a node can be lost without dropping below the count
+  # that was sufficient before the observability stack; max_size 4 leaves room
+  # for a rollout surge.
   node_instance_types = ["t4g.medium"]
   node_min_size       = 2
   node_max_size       = 4
-  node_desired_size   = 2
+  node_desired_size   = 3
   node_disk_size      = 20
 }
 
