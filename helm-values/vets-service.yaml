@@ -10,7 +10,7 @@ fullnameOverride: vets-service
 component: service
 image:
   name: vets-service
-  tag: "964e645"
+  tag: "b1e35a0"
 service:
   port: 8083
 # THREE profiles, and `production` is not decoration.

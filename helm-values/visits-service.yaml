@@ -11,7 +11,7 @@ fullnameOverride: visits-service
 component: service
 image:
   name: visits-service
-  tag: "964e645"
+  tag: "b1e35a0"
 service:
   port: 8082
 springProfiles: docker,mysql

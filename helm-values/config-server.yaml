@@ -10,10 +10,10 @@ fullnameOverride: config-server
 component: server
 image:
   name: config-server
-  # v1.0.0 is the tag scripts/build-push-ecr.sh pushed for PETPLAT-85 and the
-  # tag currently in ECR. CI replaces this with the commit SHA on every build
+  # Commit SHA of the application repo, and the tag scripts/build-push-ecr.sh
+  # pushed for the 2026-10-16 rebuild. CI replaces this on every build
   # (PETPLAT-101) — never with `latest`.
-  tag: "964e645"
+  tag: "b1e35a0"
 service:
   port: 8888
 springProfiles: docker

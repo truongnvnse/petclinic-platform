@@ -12,7 +12,7 @@ fullnameOverride: api-gateway
 component: gateway
 image:
   name: api-gateway
-  tag: "964e645"
+  tag: "b1e35a0"
 service:
   port: 8080
 springProfiles: docker

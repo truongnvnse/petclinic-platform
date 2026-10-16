@@ -30,7 +30,7 @@ component: admin
 replicaCount: 1
 image:
   name: admin-server
-  tag: "964e645"
+  tag: "b1e35a0"
 service:
   port: 9090
 # No `production`: unlike vets-service and genai-service, this module's
