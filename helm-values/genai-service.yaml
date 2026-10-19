@@ -11,7 +11,7 @@ fullnameOverride: genai-service
 component: service
 image:
   name: genai-service
-  tag: "b1e35a0"
+  tag: "60d6f87"
 service:
   port: 8084
 # No `mysql`. The spec's service table marks this one "Needs MySQL: Optional",
